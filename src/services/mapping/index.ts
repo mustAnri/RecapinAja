@@ -31,7 +31,7 @@ export function buildSequentialMapping(
       photos: sortedPhotos.length,
       rows: rows.length,
       mapped: pairCount,
-      invalidRows: entries.filter((e) => e.row.error !== null).length,
+      invalidRows: entries.filter((e) => e.row.error !== null || e.row.dateError !== null).length,
     },
   };
 }

@@ -5,8 +5,8 @@
  *   1. List Jam   — paste the Google Spreadsheet link (source of the times)
  *   2. Foto       — pick the local folder with the raw photos
  *   3. Crop 1:1   — draw the manual crop once, applied to every photo
- *   4. Tanggal    — type the date once, applied to every photo
- *   5. Kolom Jam  — pick worksheet / time column / start row + review mapping
+ *   4. Tanggal    — date from a spreadsheet column or one manual value
+ *   5. Kolom Jam  — worksheet / rows / time source + review mapping
  *   6. Proses     — run the batch into a chosen output folder
  *   7. Hasil      — summary of what was saved
  */
@@ -27,14 +27,14 @@ import {
 import { loadSpreadsheet } from './services/spreadsheet';
 import {
   extractTimestampRows,
+  guessDateColumn,
   guessTimeColumn,
-  isSelectionComplete,
   rowHeaders,
 } from './services/spreadsheet/parse';
 import { buildSequentialMapping } from './services/mapping';
 import { processBatch } from './services/batchProcessor';
 import { sortPhotosByFilename } from './utils/imageOrdering';
-import { DEFAULT_FORMAT_ID, formatTimestamp, parseDateCell } from './utils/dateFormatter';
+import { DEFAULT_FORMAT_ID, formatTimestamp, parseDateCell, parseTimeCell } from './utils/dateFormatter';
 import { Button, ErrorBanner, Guide, Icons } from './components/ui';
 import { FolderSelector } from './components/FolderSelector/FolderSelector';
 import { SpreadsheetUrlInput } from './components/SpreadsheetUrlInput/SpreadsheetUrlInput';
@@ -63,12 +63,12 @@ const STEPS = [
   },
   {
     title: 'Tanggal',
-    subtitle: 'Isi tanggal yang dipakai semua foto',
+    subtitle: 'Tanggal dari kolom spreadsheet atau input manual',
     icon: Icons.clipboard,
   },
   {
     title: 'Kolom Jam',
-    subtitle: 'Atur kolom & review pasangan foto ↔ jam',
+    subtitle: 'Sumber jam, kolom & review pasangan foto ↔ jam',
     icon: Icons.database,
   },
   {
@@ -88,6 +88,15 @@ type StepIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 function runStamp(): string {
   return new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-');
 }
+
+/** Empty sheet stand-in so a fully manual run needs no spreadsheet at all. */
+const NO_SHEET: ImportedSheet = {
+  sourceTitle: 'Manual',
+  spreadsheetId: null,
+  gid: 0,
+  headers: [],
+  rows: [],
+};
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -154,11 +163,12 @@ export default function App() {
   // Step 3 — crop template
   const [template, setTemplate] = useState<CropTemplate | null>(null);
 
-  // Step 4 — manual date (applies to every photo)
+  // Step 4 — manual date (used when dateSource is "manual")
   const [dateInput, setDateInput] = useState('');
 
-  // Step 5 — column selection
+  // Step 5 — column selection + manual time (used when timeSource is "manual")
   const [selection, setSelection] = useState<RowSelection>(EMPTY_SELECTION);
+  const [timeInput, setTimeInput] = useState('');
 
   // Steps 6/7 — batch run
   const [progress, setProgress] = useState<BatchProgress | null>(null);
@@ -170,12 +180,30 @@ export default function App() {
 
   const photos = useMemo(() => (folder ? sortPhotosByFilename(folder.photos) : []), [folder]);
 
-  const dateValid = dateInput.trim() !== '' && parseDateCell(dateInput) !== null;
+  const dateValid = dateInput.trim() !== '' && parseDateCell(dateInput.trim()) !== null;
+  const timeValid = timeInput.trim() !== '' && parseTimeCell(timeInput.trim()) !== null;
+
+  /** Is the date side configured well enough to stamp photos? */
+  const dateReady =
+    selection.dateSource === 'manual' ? dateValid : selection.dateColumn !== null;
+  /** Is the time side configured well enough to stamp photos? */
+  const timeReady =
+    selection.timeSource === 'manual' ? timeValid : selection.timeColumn !== null;
+
+  const fullyManual =
+    selection.dateSource === 'manual' && selection.timeSource === 'manual';
 
   const extracted = useMemo(() => {
-    if (!sheet || !isSelectionComplete(selection)) return null;
-    return extractTimestampRows(sheet, selection);
-  }, [sheet, selection]);
+    // A sheet source needs a loaded sheet; a fully manual run works without one.
+    if (!sheet && !fullyManual) return null;
+    const source = sheet ?? NO_SHEET;
+    return extractTimestampRows(
+      source,
+      selection,
+      { dateCell: dateInput, timeCell: timeInput },
+      photos.length,
+    );
+  }, [sheet, selection, dateInput, timeInput, photos.length, fullyManual]);
 
   const mapping = useMemo(
     () => (extracted ? buildSequentialMapping(photos, extracted.rows) : null),
@@ -189,7 +217,11 @@ export default function App() {
     setGidSelection(loaded.gid);
     setOutput(null);
     const headers = rowHeaders(loaded, 1);
-    setSelection((prev) => ({ ...prev, timeColumn: guessTimeColumn(headers) }));
+    setSelection((prev) => ({
+      ...prev,
+      timeColumn: guessTimeColumn(headers),
+      dateColumn: guessDateColumn(headers),
+    }));
   };
 
   const handleLoadUrl = async () => {
@@ -241,9 +273,9 @@ export default function App() {
     photos.length > 0 &&
     !!mapping &&
     mapping.entries.length > 0 &&
-    isSelectionComplete(selection) &&
     !!template &&
-    dateValid &&
+    dateReady &&
+    timeReady &&
     !progress;
 
   const handleProcess = async () => {
@@ -267,7 +299,6 @@ export default function App() {
     try {
       const result = await processBatch(mapping.entries, {
         crop: template,
-        dateCell: dateInput,
         formatId: DEFAULT_FORMAT_ID,
         position: 'bottom-right',
         outputFolder,
@@ -300,6 +331,7 @@ export default function App() {
     setFolder(null);
     setTemplate(null);
     setDateInput('');
+    setTimeInput('');
     setProgress(null);
     setOutput(null);
     setBatchError(null);
@@ -312,12 +344,21 @@ export default function App() {
   /* Checklist of what is still needed before processing (no lock — informational). */
   const missing: { label: string; step: StepIndex }[] = [];
   if (!sheet) missing.push({ label: 'Spreadsheet belum dimuat', step: 0 });
-  else if (!isSelectionComplete(selection))
-    missing.push({ label: 'Kolom jam belum dipilih', step: 4 });
   if (photos.length === 0) missing.push({ label: 'Folder foto belum dipilih', step: 1 });
   if (photos.length > 0 && !template)
     missing.push({ label: 'Crop 1:1 belum dikonfirmasi', step: 2 });
-  if (!dateValid) missing.push({ label: 'Tanggal belum diisi', step: 3 });
+  if (selection.dateSource === 'sheet') {
+    if (selection.dateColumn === null)
+      missing.push({ label: 'Kolom tanggal belum dipilih', step: 3 });
+  } else if (!dateValid) {
+    missing.push({ label: 'Tanggal manual belum diisi / tidak valid', step: 3 });
+  }
+  if (selection.timeSource === 'sheet') {
+    if (selection.timeColumn === null)
+      missing.push({ label: 'Kolom jam belum dipilih', step: 4 });
+  } else if (!timeValid) {
+    missing.push({ label: 'Jam manual belum diisi / tidak valid', step: 4 });
+  }
   if (sheet && photos.length > 0 && (!mapping || mapping.entries.length === 0))
     missing.push({ label: 'Belum ada pasangan foto ↔ jam', step: 4 });
 
@@ -330,9 +371,9 @@ export default function App() {
       case 2:
         return !!template;
       case 3:
-        return dateValid;
+        return dateReady;
       case 4:
-        return !!mapping && mapping.entries.length > 0;
+        return timeReady && !!mapping && mapping.entries.length > 0;
       case 5:
         return !!output;
       default:
@@ -346,6 +387,16 @@ export default function App() {
   );
   const progressPercent = Math.round((completedCount / STEPS.length) * 100);
   const activeMeta = STEPS[step];
+
+  const sheetHeaders = sheet ? rowHeaders(sheet, selection.headerRow) : [];
+  const dateColumnLabel =
+    selection.dateColumn !== null
+      ? sheetHeaders[selection.dateColumn] || `Column ${selection.dateColumn + 1}`
+      : null;
+  const timeColumnLabel =
+    selection.timeColumn !== null
+      ? sheetHeaders[selection.timeColumn] || `Column ${selection.timeColumn + 1}`
+      : null;
 
   return (
     <div className="app-bg min-h-screen">
@@ -605,13 +656,20 @@ export default function App() {
               <>
                 <Guide
                   steps={[
-                    'Isi tanggal yang berlaku untuk semua foto.',
-                    'Tanggal ini digabung dengan tiap jam dari spreadsheet.',
-                    'Preview menunjukkan hasil akhir timestamp sebelum diproses.',
+                    'Pilih sumber tanggal: kolom spreadsheet (satu tanggal per baris) atau satu tanggal manual.',
+                    'Mode kolom: pilih kolom yang berisi daftar tanggal — tiap baris punya tanggal sendiri.',
+                    'Mode manual: ketik satu tanggal yang dipakai untuk semua foto.',
+                    'Tanggal digabung dengan jam tiap foto menjadi timestamp akhir.',
                   ]}
                 />
                 <TimestampInput
+                  sheet={sheet}
+                  headerRow={selection.headerRow}
+                  dateSource={selection.dateSource}
+                  dateColumn={selection.dateColumn}
                   dateInput={dateInput}
+                  onDateSource={(source) => setSelection({ ...selection, dateSource: source })}
+                  onDateColumn={(column) => setSelection({ ...selection, dateColumn: column })}
                   onDateChange={setDateInput}
                   formatId={DEFAULT_FORMAT_ID}
                   disabled={!!progress}
@@ -621,9 +679,11 @@ export default function App() {
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
-                  {!dateValid && (
+                  {!dateReady && (
                     <p className="text-xs text-slate-400">
-                      Hint: tanggal belum diisi — timestamp belum bisa dibentuk.
+                      Hint: {selection.dateSource === 'manual'
+                        ? 'tanggal manual belum valid.'
+                        : 'kolom tanggal belum dipilih.'}
                     </p>
                   )}
                   <Button onClick={() => setStep(4)}>
@@ -640,8 +700,8 @@ export default function App() {
                   steps={[
                     'Pilih worksheet (gid) jika data bukan di tab pertama.',
                     'Atur baris header dan baris awal data bila terdeteksi salah.',
-                    'Pilih kolom yang berisi daftar jam.',
-                    'Periksa tabel pasangan foto ↔ jam di bawah sebelum lanjut.',
+                    'Pilih sumber jam: kolom spreadsheet (satu jam per baris) atau satu jam manual untuk semua foto.',
+                    'Periksa tabel pasangan foto ↔ timestamp di bawah sebelum lanjut.',
                   ]}
                 />
                 {sheet ? (
@@ -653,6 +713,8 @@ export default function App() {
                       gidSelection={gidSelection}
                       onWorksheet={handleWorksheet}
                       loadingWorksheet={worksheetLoading}
+                      manualTime={timeInput}
+                      onManualTime={setTimeInput}
                       disabled={!!progress}
                     />
                     {sheetError && <ErrorBanner message={sheetError} />}
@@ -663,18 +725,26 @@ export default function App() {
                         </h2>
                         <p className="mt-1 text-xs text-slate-500">
                           Foto diurutkan berdasarkan nama file lalu dipasangkan berurutan dengan
-                          list jam. Periksa pasangan di bawah sebelum menjalankan proses.
+                          list timestamp. Periksa pasangan di bawah sebelum menjalankan proses.
                         </p>
                         <div className="mt-5">
-                          <MappingPreview
-                            mapping={mapping}
-                            formatId={DEFAULT_FORMAT_ID}
-                            dateCell={dateInput}
-                          />
+                          <MappingPreview mapping={mapping} formatId={DEFAULT_FORMAT_ID} />
                         </div>
                       </div>
                     )}
                   </>
+                ) : selection.timeSource === 'manual' ? (
+                  <ColumnSelector
+                    sheet={sheet}
+                    config={selection}
+                    onConfig={setSelection}
+                    gidSelection={gidSelection}
+                    onWorksheet={handleWorksheet}
+                    loadingWorksheet={worksheetLoading}
+                    manualTime={timeInput}
+                    onManualTime={setTimeInput}
+                    disabled={!!progress}
+                  />
                 ) : (
                   <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
                     <Icons.database className="mx-auto h-8 w-8 text-slate-300" />
@@ -765,15 +835,30 @@ export default function App() {
 
                   {mapping && mapping.entries.length > 0 && (
                     <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-6 py-4 text-xs">
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1.5 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200/60">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1.5 font-semibold text-violet-700 ring-1 ring-inset ring-violet-200/60">
                         <Icons.clipboard className="h-3.5 w-3.5" />
                         Tanggal:{' '}
-                        {dateValid
-                          ? formatTimestamp(dateInput, '00:00', DEFAULT_FORMAT_ID).replace(
-                              ' 00:00',
-                              '',
-                            )
-                          : '-'}
+                        {selection.dateSource === 'manual'
+                          ? dateValid
+                            ? formatTimestamp(dateInput.trim(), '00:00', DEFAULT_FORMAT_ID).replace(
+                                ' 00:00',
+                                '',
+                              )
+                            : '-'
+                          : dateColumnLabel
+                            ? `kolom “${dateColumnLabel}”`
+                            : '-'}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1.5 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200/60">
+                        <Icons.clipboard className="h-3.5 w-3.5" />
+                        Jam:{' '}
+                        {selection.timeSource === 'manual'
+                          ? timeValid
+                            ? timeInput.trim()
+                            : '-'
+                          : timeColumnLabel
+                            ? `kolom “${timeColumnLabel}”`
+                            : '-'}
                       </span>
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 font-semibold text-slate-600 ring-1 ring-inset ring-slate-200/60">
                         <Icons.image className="h-3.5 w-3.5" />

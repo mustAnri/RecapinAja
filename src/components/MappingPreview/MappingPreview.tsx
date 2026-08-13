@@ -6,8 +6,6 @@ interface MappingPreviewProps {
   mapping: SequentialMapping;
   /** Timestamp format used to preview the final overlay text. */
   formatId: string;
-  /** Manually entered date applied to every row ('' = not filled yet). */
-  dateCell: string;
 }
 
 const MAX_LISTED = 300;
@@ -16,7 +14,7 @@ const MAX_LISTED = 300;
  * Step 5 preview (PRDv2 §16): the sequential photo-to-timestamp mapping is
  * shown before processing — the safety net for positional mapping.
  */
-export function MappingPreview({ mapping, formatId, dateCell }: MappingPreviewProps) {
+export function MappingPreview({ mapping, formatId }: MappingPreviewProps) {
   const { entries, extraPhotos, extraRows, counts } = mapping;
 
   return (
@@ -74,8 +72,12 @@ export function MappingPreview({ mapping, formatId, dateCell }: MappingPreviewPr
                 <td className="px-4 py-2 font-mono text-xs text-slate-600">
                   {entry.row.error ? (
                     <span className="text-red-600">{entry.row.time || '(empty)'}</span>
-                  ) : dateCell ? (
-                    formatTimestamp(dateCell, entry.row.time, formatId)
+                  ) : entry.row.dateError ? (
+                    <span className="text-red-600">
+                      {entry.row.date || '(empty)'} — tanggal bermasalah
+                    </span>
+                  ) : entry.row.date ? (
+                    formatTimestamp(entry.row.date, entry.row.time, formatId)
                   ) : (
                     <span className="text-amber-600">
                       {entry.row.time} — tanggal belum diisi
@@ -87,6 +89,11 @@ export function MappingPreview({ mapping, formatId, dateCell }: MappingPreviewPr
                     <Badge tone="red">
                       <Icons.alert className="h-3 w-3" />
                       {entry.row.error}
+                    </Badge>
+                  ) : entry.row.dateError ? (
+                    <Badge tone="red">
+                      <Icons.alert className="h-3 w-3" />
+                      {entry.row.dateError}
                     </Badge>
                   ) : (
                     <Badge tone="emerald">

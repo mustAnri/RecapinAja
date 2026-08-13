@@ -4,7 +4,13 @@ import { buildSequentialMapping } from './index';
 
 const file = (name: string): File => new File(['x'], name, { type: 'image/jpeg' });
 
-const row = (n: number, error: string | null = null): SpreadsheetRow => ({
+const row = (
+  n: number,
+  error: string | null = null,
+  dateError: string | null = null,
+): SpreadsheetRow => ({
+  date: '20/05/2022',
+  dateError,
   time: '14:09',
   sheetRowNumber: n,
   error,
@@ -42,10 +48,10 @@ describe('buildSequentialMapping (§14, §15)', () => {
 
   it('counts invalid rows inside the mapped pairs', () => {
     const mapping = buildSequentialMapping(
-      [file('a.jpg'), file('b.jpg')],
-      [row(2, 'Invalid time: "x"'), row(3)],
+      [file('a.jpg'), file('b.jpg'), file('c.jpg')],
+      [row(2, 'Invalid time: "x"'), row(3, null, 'Invalid date: "y"'), row(4)],
     );
-    expect(mapping.counts.invalidRows).toBe(1);
+    expect(mapping.counts.invalidRows).toBe(2);
   });
 
   it('handles empty inputs', () => {

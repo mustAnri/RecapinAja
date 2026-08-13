@@ -3,6 +3,7 @@ import type { ImportedSheet, RowSelection } from '../../types/spreadsheet';
 import {
   describeUnselectedRoles,
   extractTimestampRows,
+  guessDateColumn,
   guessTimeColumn,
   isSelectionComplete,
   parseSheetValues,
@@ -16,6 +17,15 @@ const sheet = (headers: string[], rows: string[][]): ImportedSheet => ({
   headers,
   rows: [headers, ...rows],
 });
+
+const SHEET_SELECTION: RowSelection = {
+  timeColumn: 2,
+  dateColumn: 1,
+  dateSource: 'sheet',
+  timeSource: 'sheet',
+  headerRow: 1,
+  startRow: 2,
+};
 
 describe('parseSheetValues', () => {
   it('treats the first row as headers and trims cells', () => {
@@ -34,44 +44,68 @@ describe('parseSheetValues', () => {
   });
 });
 
-describe('time column guessing', () => {
+describe('column guessing', () => {
   it('finds Indonesian time headers', () => {
     expect(guessTimeColumn(['No', 'Nama', 'Tanggal', 'Jam Test Drive'])).toBe(3);
   });
 
-  it('finds English headers', () => {
+  it('finds English time headers', () => {
     expect(guessTimeColumn(['Name', 'Date', 'Time'])).toBe(2);
+  });
+
+  it('finds Indonesian date headers', () => {
+    expect(guessDateColumn(['No', 'Nama', 'Tanggal', 'Jam'])).toBe(2);
+  });
+
+  it('finds English date headers', () => {
+    expect(guessDateColumn(['Name', 'Date', 'Time'])).toBe(1);
   });
 
   it('returns null when nothing matches', () => {
     expect(guessTimeColumn(['No', 'Nama'])).toBeNull();
+    expect(guessDateColumn(['No', 'Nama'])).toBeNull();
   });
 });
 
 describe('selection completeness', () => {
-  const base: RowSelection = { timeColumn: 2, headerRow: 1, startRow: 2 };
-
-  it('is complete when the time column is chosen', () => {
-    expect(isSelectionComplete(base)).toBe(true);
+  it('is complete when both columns are chosen (sheet sources)', () => {
+    expect(isSelectionComplete(SHEET_SELECTION)).toBe(true);
   });
 
-  it('lists the missing role', () => {
-    expect(describeUnselectedRoles({ ...base, timeColumn: null })).toHaveLength(1);
-    expect(describeUnselectedRoles(base)).toHaveLength(0);
+  it('lists missing roles per value source', () => {
+    expect(
+      describeUnselectedRoles({ ...SHEET_SELECTION, dateColumn: null, timeColumn: null }),
+    ).toEqual(['Date', 'Time']);
+    expect(describeUnselectedRoles(SHEET_SELECTION)).toEqual([]);
+  });
+
+  it('a manual source removes the need for that column', () => {
+    expect(
+      isSelectionComplete({ ...SHEET_SELECTION, dateColumn: null, dateSource: 'manual' }),
+    ).toBe(true);
+    expect(
+      isSelectionComplete({ ...SHEET_SELECTION, timeColumn: null, timeSource: 'manual' }),
+    ).toBe(true);
+    expect(isSelectionComplete({ ...SHEET_SELECTION, dateColumn: null })).toBe(false);
+    expect(isSelectionComplete({ ...SHEET_SELECTION, timeColumn: null })).toBe(false);
   });
 });
 
-describe('extractTimestampRows (time list)', () => {
-  const selection: RowSelection = { timeColumn: 2, headerRow: 1, startRow: 2 };
-
-  it('extracts times with spreadsheet row numbers', () => {
+describe('extractTimestampRows (sheet sources)', () => {
+  it('extracts date + time with spreadsheet row numbers', () => {
     const data = sheet(['No', 'Tanggal', 'Jam'], [
       ['1', '20/05/2022', '14:09'],
       ['2', '21/05/2022', '09:30'],
     ]);
-    const { rows } = extractTimestampRows(data, selection);
+    const { rows } = extractTimestampRows(data, SHEET_SELECTION);
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toEqual({ time: '14:09', sheetRowNumber: 2, error: null });
+    expect(rows[0]).toEqual({
+      date: '20/05/2022',
+      dateError: null,
+      time: '14:09',
+      sheetRowNumber: 2,
+      error: null,
+    });
     expect(rows[1].sheetRowNumber).toBe(3);
   });
 
@@ -81,20 +115,22 @@ describe('extractTimestampRows (time list)', () => {
       ['', '', ''],
       ['2', '21/05/2022', '09:30'],
     ]);
-    const { rows, skippedBlank } = extractTimestampRows(data, selection);
+    const { rows, skippedBlank } = extractTimestampRows(data, SHEET_SELECTION);
     expect(rows).toHaveLength(2);
     expect(skippedBlank).toBe(1);
   });
 
-  it('keeps invalid rows with an error instead of dropping them', () => {
-    const data = sheet(['No', 'Tanggal', 'Jam'], [['1', '20/05/2022', 'bukan jam']]);
-    const { rows } = extractTimestampRows(data, selection);
+  it('keeps invalid cells with errors instead of dropping them', () => {
+    const data = sheet(['No', 'Tanggal', 'Jam'], [['1', 'bukan tanggal', 'bukan jam']]);
+    const { rows } = extractTimestampRows(data, SHEET_SELECTION);
+    expect(rows[0].dateError).toMatch(/Invalid date/);
     expect(rows[0].error).toMatch(/Invalid time/);
   });
 
-  it('flags empty time cells', () => {
-    const data = sheet(['No', 'Tanggal', 'Jam'], [['1', '20/05/2022', '']]);
-    const { rows } = extractTimestampRows(data, selection);
+  it('flags empty cells', () => {
+    const data = sheet(['No', 'Tanggal', 'Jam'], [['1', '', '']]);
+    const { rows } = extractTimestampRows(data, SHEET_SELECTION);
+    expect(rows[0].dateError).toMatch(/Date is empty/);
     expect(rows[0].error).toMatch(/Time is empty/);
   });
 
@@ -103,22 +139,129 @@ describe('extractTimestampRows (time list)', () => {
       ['x', '01/01/2020', '00:00'],
       ['1', '20/05/2022', '14:09'],
     ]);
-    const { rows } = extractTimestampRows(data, { ...selection, startRow: 3 });
+    const { rows } = extractTimestampRows(data, { ...SHEET_SELECTION, startRow: 3 });
     expect(rows).toHaveLength(1);
     expect(rows[0].sheetRowNumber).toBe(3);
   });
 
   it('never starts before the header row', () => {
     const data = sheet(['No', 'Tanggal', 'Jam'], [['1', '20/05/2022', '14:09']]);
-    const { rows } = extractTimestampRows(data, { ...selection, startRow: 1 });
+    const { rows } = extractTimestampRows(data, { ...SHEET_SELECTION, startRow: 1 });
     expect(rows).toHaveLength(1);
     expect(rows[0].sheetRowNumber).toBe(2);
   });
 
-  it('returns nothing until the time column is chosen', () => {
+  it('returns nothing until a needed sheet column is chosen', () => {
     const data = sheet(['No', 'Tanggal', 'Jam'], [['1', '20/05/2022', '14:09']]);
-    const { rows } = extractTimestampRows(data, { ...selection, timeColumn: null });
+    expect(extractTimestampRows(data, { ...SHEET_SELECTION, timeColumn: null }).rows).toEqual([]);
+    expect(extractTimestampRows(data, { ...SHEET_SELECTION, dateColumn: null }).rows).toEqual([]);
+  });
+});
+
+describe('extractTimestampRows (independent sources)', () => {
+  it('manual time keeps per-row dates from the sheet', () => {
+    const data = sheet(['No', 'Tanggal', 'Jam'], [
+      ['1', '20/05/2022', '14:09'],
+      ['2', '21/05/2022', '09:30'],
+    ]);
+    const { rows } = extractTimestampRows(
+      data,
+      { ...SHEET_SELECTION, timeSource: 'manual' },
+      { dateCell: '', timeCell: '10:00' },
+    );
+    expect(rows.map((r) => r.date)).toEqual(['20/05/2022', '21/05/2022']);
+    expect(rows.map((r) => r.time)).toEqual(['10:00', '10:00']);
+    expect(rows.every((r) => r.error === null)).toBe(true);
+  });
+
+  it('manual date keeps per-row times from the sheet', () => {
+    const data = sheet(['No', 'Tanggal', 'Jam'], [
+      ['1', '20/05/2022', '14:09'],
+      ['2', '21/05/2022', '09:30'],
+    ]);
+    const { rows } = extractTimestampRows(
+      data,
+      { ...SHEET_SELECTION, dateSource: 'manual' },
+      { dateCell: '01/06/2022', timeCell: '' },
+    );
+    expect(rows.map((r) => r.date)).toEqual(['01/06/2022', '01/06/2022']);
+    expect(rows.map((r) => r.time)).toEqual(['14:09', '09:30']);
+    expect(rows.every((r) => r.dateError === null)).toBe(true);
+  });
+
+  it('invalid manual values mark every row', () => {
+    const data = sheet(['No', 'Jam'], [['1', '14:09'], ['2', '09:30']]);
+    const { rows } = extractTimestampRows(
+      data,
+      {
+        timeColumn: 1,
+        dateColumn: null,
+        dateSource: 'manual',
+        timeSource: 'sheet',
+        headerRow: 1,
+        startRow: 2,
+      },
+      { dateCell: 'salah', timeCell: '' },
+    );
+    expect(rows.every((r) => r.dateError !== null)).toBe(true);
+    expect(rows.every((r) => r.error === null)).toBe(true);
+  });
+});
+
+describe('extractTimestampRows (fully manual — no sheet)', () => {
+  const empty: ImportedSheet = {
+    sourceTitle: '',
+    spreadsheetId: null,
+    gid: 0,
+    headers: [],
+    rows: [],
+  };
+
+  const MANUAL_SELECTION: RowSelection = {
+    timeColumn: null,
+    dateColumn: null,
+    dateSource: 'manual',
+    timeSource: 'manual',
+    headerRow: 1,
+    startRow: 2,
+  };
+
+  it('creates one row per photo with the typed date and time', () => {
+    const { rows } = extractTimestampRows(
+      empty,
+      { ...MANUAL_SELECTION, startRow: 1 },
+      { dateCell: '20/05/2022', timeCell: '14:09' },
+      3,
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual({
+      date: '20/05/2022',
+      dateError: null,
+      time: '14:09',
+      sheetRowNumber: 1,
+      error: null,
+    });
+    expect(rows.map((r) => r.sheetRowNumber)).toEqual([1, 2, 3]);
+  });
+
+  it('defaults the count to zero', () => {
+    const { rows } = extractTimestampRows(
+      empty,
+      { ...MANUAL_SELECTION, startRow: 1 },
+      { dateCell: '20/05/2022', timeCell: '14:09' },
+    );
     expect(rows).toEqual([]);
+  });
+
+  it('marks every synthetic row when the typed values are invalid', () => {
+    const { rows } = extractTimestampRows(
+      empty,
+      { ...MANUAL_SELECTION, startRow: 1 },
+      { dateCell: '', timeCell: '' },
+      2,
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.dateError !== null && r.error !== null)).toBe(true);
   });
 });
 

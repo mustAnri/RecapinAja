@@ -40,7 +40,7 @@ function fakeOutputFolder(options?: { subfolderThrows?: boolean }) {
 const entry = (name: string): SequentialMappingEntry => ({
   file: makeFile(name),
   filename: name,
-  row: { time: '14:09', sheetRowNumber: 2, error: 'The time cell is empty.' },
+  row: { date: '20/05/2022', dateError: null, time: '14:09', sheetRowNumber: 2, error: 'The time cell is empty.' },
 });
 
 describe('processBatch — extra photos', () => {
@@ -50,7 +50,6 @@ describe('processBatch — extra photos', () => {
 
     const output = await processBatch([], {
       crop: CROP,
-      dateCell: '20/05/2022',
       formatId: 'default',
       outputFolder: folder,
       extraPhotos: extras,
@@ -73,7 +72,6 @@ describe('processBatch — extra photos', () => {
     const { folder } = fakeOutputFolder();
     const output = await processBatch([entry('a.jpg')], {
       crop: CROP,
-      dateCell: '20/05/2022',
       formatId: 'default',
       outputFolder: folder,
       extraPhotos: [makeFile('b.jpg')],
@@ -83,11 +81,27 @@ describe('processBatch — extra photos', () => {
     expect(output.results.map((r) => r.status)).toEqual(['failed', 'copied']);
   });
 
+  it('fails a photo whose spreadsheet row has an invalid date', async () => {
+    const { folder, written } = fakeOutputFolder();
+    const badDate: SequentialMappingEntry = {
+      file: makeFile('a.jpg'),
+      filename: 'a.jpg',
+      row: { date: 'bukan tanggal', dateError: 'Invalid date: "bukan tanggal"', time: '14:09', sheetRowNumber: 2, error: null },
+    };
+    const output = await processBatch([badDate], {
+      crop: CROP,
+      formatId: 'default',
+      outputFolder: folder,
+    });
+    expect(output.summary).toEqual({ total: 1, successful: 0, failed: 1, copied: 0 });
+    expect(output.results[0].error).toContain('tanggal');
+    expect(written).toEqual([]);
+  });
+
   it('reports every extra as failed when the extras subfolder cannot be created', async () => {
     const { folder, written } = fakeOutputFolder({ subfolderThrows: true });
     const output = await processBatch([], {
       crop: CROP,
-      dateCell: '20/05/2022',
       formatId: 'default',
       outputFolder: folder,
       extraPhotos: [makeFile('d.jpg')],
@@ -103,7 +117,6 @@ describe('processBatch — extra photos', () => {
     const totals: Array<{ total: number; processed: number }> = [];
     await processBatch([], {
       crop: CROP,
-      dateCell: '20/05/2022',
       formatId: 'default',
       outputFolder: folder,
       extraPhotos: [makeFile('d.jpg'), makeFile('e.jpg')],

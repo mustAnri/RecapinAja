@@ -25,14 +25,23 @@ export interface ImportedSheet {
   rows: string[][];
 }
 
+/** Where one value (date or time) comes from: a sheet column or input. */
+export type ValueSource = 'sheet' | 'manual';
+
 /**
- * User configuration for reading the time list from the sheet. Column
- * indices point into the header row. The date is NOT taken from the sheet —
- * it is typed manually once and applied to every photo.
+ * User configuration for reading the timestamp list from the sheet. Column
+ * indices point into the header row. Each value can independently come from
+ * a sheet column or from one manually typed value applied to every row.
  */
 export interface RowSelection {
-  /** Column holding the time, e.g. "Jam Test Drive". */
+  /** Column holding the time, e.g. "Jam Test Drive" (time source "sheet"). */
   timeColumn: number | null;
+  /** Column holding the date, e.g. "Tanggal" (date source "sheet"). */
+  dateColumn: number | null;
+  /** Where dates come from: the date column or one manual date. */
+  dateSource: ValueSource;
+  /** Where times come from: the time column or one manual time. */
+  timeSource: ValueSource;
   /** 1-based spreadsheet row containing the headers (usually 1). */
   headerRow: number;
   /**
@@ -47,6 +56,9 @@ export const DEFAULT_START_ROW = 2;
 
 export const EMPTY_SELECTION: RowSelection = {
   timeColumn: null,
+  dateColumn: null,
+  dateSource: 'sheet',
+  timeSource: 'sheet',
   headerRow: DEFAULT_HEADER_ROW,
   startRow: DEFAULT_START_ROW,
 };
@@ -58,11 +70,15 @@ export const EMPTY_SELECTION: RowSelection = {
  * timestamp.
  */
 export interface SpreadsheetRow {
+  /** Date cell for this row — sheet column value or the manual date. */
+  date: string;
+  /** Validation problem for the date cell, or null when usable. */
+  dateError: string | null;
   /** Time cell exactly as written in the sheet, e.g. "14:09". */
   time: string;
   /** 1-based row number in the spreadsheet — used in user-facing messages. */
   sheetRowNumber: number;
-  /** Validation problem, or null when the row is usable. */
+  /** Validation problem for the time, or null when the row is usable. */
   error: string | null;
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { CropTemplate } from '../../types/processing';
 import { Badge, Button, Card, ErrorBanner, Field, Icons, InfoBanner, inputClasses } from '../ui';
@@ -25,6 +25,8 @@ interface CropRect {
 }
 
 const MIN_SIDE_PX = 32;
+/** Biggest displayed side of the preview, so huge photos stay usable. */
+const MAX_PREVIEW_SIDE = 480;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
@@ -33,6 +35,27 @@ function clamp(value: number, min: number, max: number): number {
 function centerCrop(photo: LoadedPhoto): CropRect {
   const side = Math.max(MIN_SIDE_PX, Math.min(photo.width, photo.height));
   return { x: Math.round((photo.width - side) / 2), y: Math.round((photo.height - side) / 2), side };
+}
+
+/** Nearest common aspect ratio label for display (e.g. 9:16, 16:9, 1:1). */
+function aspectLabel(width: number, height: number): string {
+  const value = width / height;
+  const ratios: Array<[string, number]> = [
+    ['1:1', 1],
+    ['4:5', 4 / 5],
+    ['5:4', 5 / 4],
+    ['3:4', 3 / 4],
+    ['4:3', 4 / 3],
+    ['2:3', 2 / 3],
+    ['3:2', 3 / 2],
+    ['9:16', 9 / 16],
+    ['16:9', 16 / 9],
+    ['21:9', 21 / 9],
+  ];
+  for (const [label, ratio] of ratios) {
+    if (Math.abs(value - ratio) < 0.02) return label;
+  }
+  return `${value.toFixed(2)}:1`;
 }
 
 /**
@@ -45,7 +68,8 @@ export function CropEditor({ photos, template, onConfirm, disabled = false }: Cr
   const [photo, setPhoto] = useState<LoadedPhoto | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [crop, setCrop] = useState<CropRect | null>(null);
-  const [scale, setScale] = useState(1);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const dragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; origin: CropRect } | null>(null);
@@ -96,19 +120,30 @@ export function CropEditor({ photos, template, onConfirm, disabled = false }: Cr
     };
   }, [selectedPhoto, template]);
 
-  // Track displayed size so pointer math maps to natural pixels.
-  const measureScale = useCallback(() => {
-    const img = imgRef.current;
-    if (img && img.naturalWidth > 0) {
-      setScale(img.clientWidth / img.naturalWidth);
-    }
-  }, []);
-
+  // Track the space available for the preview so ANY aspect ratio (16:9,
+  // 9:16, 1:1, 4:3, …) is shown fully and the crop rectangle always lines
+  // up with the displayed pixels — no letterboxing, no misalignment.
   useEffect(() => {
-    measureScale();
-    window.addEventListener('resize', measureScale);
-    return () => window.removeEventListener('resize', measureScale);
-  }, [measureScale, photo]);
+    const element = containerRef.current;
+    if (!element) return;
+    const update = () => setContainerWidth(element.clientWidth);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [photo]);
+
+  const fitted = useMemo(() => {
+    if (!photo || containerWidth <= 0) return null;
+    const ratio = Math.min(containerWidth / photo.width, MAX_PREVIEW_SIDE / photo.height, 1);
+    return {
+      width: Math.max(1, Math.floor(photo.width * ratio)),
+      height: Math.max(1, Math.floor(photo.height * ratio)),
+      scale: ratio,
+    };
+  }, [photo, containerWidth]);
+
+  const scale = fitted ? fitted.scale : 0;
 
   const beginDrag = (event: ReactPointerEvent, mode: 'move' | 'resize') => {
     if (!crop || disabled) return;
@@ -199,17 +234,21 @@ export function CropEditor({ photos, template, onConfirm, disabled = false }: Cr
         </div>
       )}
 
-      {photo && crop && (
+      {photo && crop && fitted && (
         <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]">
-          <div className="relative inline-block max-w-full select-none overflow-hidden rounded-lg bg-slate-900">
-            <img
-              ref={imgRef}
-              src={photo.url}
-              alt={`Preview of ${selectedName}`}
-              draggable={false}
-              onLoad={measureScale}
-              className="block h-auto max-h-[440px] w-full max-w-full object-contain"
-            />
+          <div ref={containerRef} className="min-w-0">
+            <div
+              className="relative select-none overflow-hidden rounded-lg bg-slate-900"
+              style={{ width: fitted.width, height: fitted.height }}
+            >
+              <img
+                ref={imgRef}
+                src={photo.url}
+                alt={`Preview of ${selectedName}`}
+                draggable={false}
+                className="block"
+                style={{ width: fitted.width, height: fitted.height }}
+              />
             <div
               role="button"
               aria-label="Crop area — drag to move"
@@ -235,6 +274,7 @@ export function CropEditor({ photos, template, onConfirm, disabled = false }: Cr
                 onPointerUp={endDrag}
                 className="absolute -bottom-2 -right-2 h-5 w-5 cursor-nwse-resize touch-none rounded-sm border-2 border-white bg-indigo-600"
               />
+              </div>
             </div>
           </div>
 
@@ -269,12 +309,16 @@ export function CropEditor({ photos, template, onConfirm, disabled = false }: Cr
                   {photo.width} × {photo.height}
                 </dd>
               </div>
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Aspect ratio foto</dt>
+                <dd className="tabular-nums">{aspectLabel(photo.width, photo.height)}</dd>
+              </div>
             </dl>
             <Button onClick={confirm} disabled={disabled} className="w-full">
               <Icons.check className="h-4 w-4" />
               Confirm crop
             </Button>
-            <InfoBanner message="The rectangle is stored proportionally, so photos with different resolutions get the same framing without stretching." />
+            <InfoBanner message="The rectangle is stored proportionally, so photos with any aspect ratio (16:9, 9:16, 1:1, …) keep the same framing without stretching — the preview shows exactly what will be kept." />
           </div>
         </div>
       )}

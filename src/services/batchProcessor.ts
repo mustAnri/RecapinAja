@@ -33,8 +33,7 @@ const MAX_OUTPUT_SIDE_PX = 4096;
 export interface BatchOptions {
   /** Confirmed crop template (§19), applied to every photo. */
   crop: CropTemplate;
-  /** Manually entered date applied to every photo, e.g. "20/05/2022". */
-  dateCell: string;
+
   /** Timestamp format id from the dateFormatter registry. */
   formatId: string;
   position?: TimestampPosition;
@@ -93,11 +92,18 @@ export async function processBatch(
         return {
           filename: entry.file.name,
           status: 'failed',
-          error: `Spreadsheet row ${entry.row.sheetRowNumber}: ${entry.row.error}.`,
+          error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.error}.`,
+        };
+      }
+      if (entry.row.dateError) {
+        return {
+          filename: entry.file.name,
+          status: 'failed',
+          error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.dateError}.`,
         };
       }
 
-      const timestamp = formatTimestamp(options.dateCell, entry.row.time, options.formatId);
+      const timestamp = formatTimestamp(entry.row.date, entry.row.time, options.formatId);
       try {
         const photo = await processPhoto(entry.file, {
           timestamp,
