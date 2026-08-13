@@ -33,6 +33,10 @@ No accounts, no OAuth, no server, no uploads.
    every failure. Processed copies are saved as `<name>_timestamp.<ext>` inside
    a new `Processed <date>` subfolder; the originals are never touched.
 
+When there are **more photos than time rows**, the leftover photos are never
+dropped: the original files are copied as-is (no crop, no timestamp) into a
+`Tanpa jam` subfolder inside the output folder, so every photo comes back.
+
 The steps have **no locks** — you can open any step in any order. Every step
 shows a small *Panduan* (guide) panel with what to do, plus inline hints when
 something is still missing. The *Proses* step shows a readiness checklist with

@@ -1,6 +1,6 @@
 import type { SequentialMapping } from '../../types/spreadsheet';
 import { formatTimestamp } from '../../utils/dateFormatter';
-import { Badge, ErrorBanner, Icons, StatCard, TableShell, WarningBanner } from '../ui';
+import { Badge, Icons, StatCard, TableShell, WarningBanner } from '../ui';
 
 interface MappingPreviewProps {
   mapping: SequentialMapping;
@@ -39,9 +39,13 @@ export function MappingPreview({ mapping, formatId, dateCell }: MappingPreviewPr
       </div>
 
       {extraPhotos.length > 0 && (
-        <ErrorBanner
-          message={`Not enough spreadsheet data to process all photos: ${counts.photos} photos but only ${counts.rows} timestamp rows. ${extraPhotos.length} photo(s) have no row and will fail.`}
-        />
+        <WarningBanner title={`${extraPhotos.length} foto tidak punya pasangan jam — tetap ikut tersimpan`}>
+          <p>
+            Data spreadsheet hanya cukup untuk {counts.mapped} foto. Sisanya tidak dibuang:
+            file asli <strong>disalin apa adanya</strong> (tanpa crop & tanpa timestamp) ke
+            subfolder <strong>“Tanpa jam”</strong> di dalam folder hasil.
+          </p>
+        </WarningBanner>
       )}
 
       {extraRows.length > 0 && (
@@ -104,19 +108,19 @@ export function MappingPreview({ mapping, formatId, dateCell }: MappingPreviewPr
 
       {extraPhotos.length > 0 && (
         <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-red-600">
+          <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
             Photos without a spreadsheet row ({extraPhotos.length})
           </p>
-          <TableShell headers={['Photo', 'Issue']} maxHeight="max-h-48">
+          <TableShell headers={['Photo', 'What happens']} maxHeight="max-h-48">
             {extraPhotos.slice(0, MAX_LISTED).map((file, index) => (
-              <tr key={`${file.name}-${index}`} className="bg-white hover:bg-red-50/40">
+              <tr key={`${file.name}-${index}`} className="bg-white hover:bg-amber-50/40">
                 <td className="px-4 py-2 font-medium text-slate-800">
                   <span className="block max-w-[280px] truncate">{file.name}</span>
                 </td>
                 <td className="px-4 py-2">
-                  <Badge tone="red">
-                    <Icons.x className="h-3 w-3" />
-                    No timestamp row
+                  <Badge tone="amber">
+                    <Icons.download className="h-3 w-3" />
+                    Copied as-is to “Tanpa jam”
                   </Badge>
                 </td>
               </tr>

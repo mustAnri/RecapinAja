@@ -45,7 +45,14 @@ export interface BatchOptions {
   onProgress?: (progress: BatchProgress) => void;
   /** Return true to stop gracefully after in-flight items. */
   isCancelled?: () => boolean;
+  /** Photos with no matching time row — copied as-is, never dropped. */
+  extraPhotos?: File[];
+  /** Subfolder inside the output folder that receives the extra photos. */
+  extrasFolderName?: string;
 }
+
+/** Default name of the subfolder holding as-is copies of extra photos. */
+export const EXTRAS_SUBFOLDER_NAME = 'Tanpa jam';
 
 /**
  * Process every mapped photo: crop template -> timestamp overlay -> save
@@ -55,9 +62,17 @@ export async function processBatch(
   mapping: SequentialMappingEntry[],
   options: BatchOptions,
 ): Promise<BatchOutput> {
+  const extras = options.extraPhotos ?? [];
+  const total = mapping.length + extras.length;
   const results: BatchResult[] = [];
   let processed = 0;
   let cancelled = false;
+
+  const report = (result: BatchResult) => {
+    processed += 1;
+    results.push(result);
+    options.onProgress?.({ total, processed, current: result.filename });
+  };
 
   await mapWithConcurrency(
     mapping,
@@ -101,21 +116,67 @@ export async function processBatch(
         };
       }
     },
-    (_index, result) => {
-      processed += 1;
-      results.push(result);
-      options.onProgress?.({ total: mapping.length, processed, current: result.filename });
-    },
+    (_index, result) => report(result),
   );
 
-  // Restore input (sorted) order for stable display.
-  const order = new Map(mapping.map((entry, index) => [entry.file.name, index]));
+  // Photos beyond the spreadsheet data are never dropped: the original
+  // files are copied as-is (no crop, no timestamp) into a "Tanpa jam"
+  // subfolder so the user still gets every photo back.
+  if (extras.length > 0) {
+    let extrasFolder: OutputFolder | null = null;
+    try {
+      extrasFolder = await options.outputFolder.subfolder(
+        options.extrasFolderName ?? EXTRAS_SUBFOLDER_NAME,
+      );
+    } catch {
+      // Leave extrasFolder null — every extra photo reports the failure below.
+    }
+
+    for (const file of extras) {
+      if (cancelled || (options.isCancelled?.() ?? false)) {
+        cancelled = true;
+        report({
+          filename: file.name,
+          status: 'failed',
+          error: 'Cancelled before this photo was copied.',
+        });
+        continue;
+      }
+      if (!extrasFolder) {
+        report({
+          filename: file.name,
+          status: 'failed',
+          error: `Could not create the “${options.extrasFolderName ?? EXTRAS_SUBFOLDER_NAME}” subfolder.`,
+        });
+        continue;
+      }
+      try {
+        await extrasFolder.write(file.name, file);
+        report({
+          filename: file.name,
+          outputFilename: `${extrasFolder.name}/${file.name}`,
+          status: 'copied',
+        });
+      } catch (error) {
+        report({
+          filename: file.name,
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Unable to copy file.',
+        });
+      }
+    }
+  }
+
+  // Restore input (sorted) order for stable display; extras come last.
+  const order = new Map<string, number>(mapping.map((entry, index) => [entry.file.name, index]));
+  extras.forEach((file, index) => order.set(file.name, mapping.length + index));
   results.sort((a, b) => (order.get(a.filename) ?? 0) - (order.get(b.filename) ?? 0));
 
   const summary: BatchSummary = {
-    total: mapping.length,
+    total,
     successful: results.filter((r) => r.status === 'success').length,
     failed: results.filter((r) => r.status === 'failed').length,
+    copied: results.filter((r) => r.status === 'copied').length,
   };
 
   return { results, summary, outputFolderName: options.outputFolder.name };

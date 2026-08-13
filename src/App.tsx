@@ -263,7 +263,7 @@ export default function App() {
     }
 
     const runId = ++runIdRef.current;
-    setProgress({ total: mapping.entries.length, processed: 0 });
+    setProgress({ total: mapping.entries.length + mapping.extraPhotos.length, processed: 0 });
     try {
       const result = await processBatch(mapping.entries, {
         crop: template,
@@ -271,6 +271,7 @@ export default function App() {
         formatId: DEFAULT_FORMAT_ID,
         position: 'bottom-right',
         outputFolder,
+        extraPhotos: mapping.extraPhotos,
         onProgress: (p) => {
           if (runIdRef.current === runId) setProgress(p);
         },
@@ -710,6 +711,7 @@ export default function App() {
                     'Periksa checklist kesiapan — item yang kurang bisa langsung diklik untuk dilengkapi.',
                     'Klik tombol proses lalu pilih folder tujuan.',
                     'Aplikasi membuat subfolder “Processed …” dan menyimpan hasil di sana.',
+                    'Foto tanpa pasangan jam ikut tersimpan apa adanya di subfolder “Tanpa jam”.',
                     'Pantau progres secara langsung; hasil akhir tampil di langkah 7.',
                   ]}
                 />
@@ -747,8 +749,16 @@ export default function App() {
                     ))}
                     {missing.length === 0 && mapping && (
                       <li className="flex items-center gap-2 py-2.5 font-medium text-emerald-700">
-                        <Icons.check className="h-4 w-4" />
-                        {mapping.entries.length} foto siap diproses dengan timestamp.
+                        <Icons.check className="h-4 w-4 shrink-0" />
+                        <span>
+                          {mapping.entries.length} foto siap diproses dengan timestamp.
+                          {mapping.extraPhotos.length > 0 && (
+                            <span className="font-normal text-slate-500">
+                              {' '}+ {mapping.extraPhotos.length} foto tanpa jam akan disalin apa
+                              adanya ke subfolder “Tanpa jam”.
+                            </span>
+                          )}
+                        </span>
                       </li>
                     )}
                   </ul>
@@ -777,6 +787,12 @@ export default function App() {
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1.5 font-semibold text-red-700 ring-1 ring-inset ring-red-200/60">
                           <Icons.alert className="h-3.5 w-3.5" />
                           {mapping.counts.invalidRows} baris jam invalid akan gagal
+                        </span>
+                      )}
+                      {mapping.extraPhotos.length > 0 && (
+                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 font-semibold text-amber-700 ring-1 ring-inset ring-amber-200/60">
+                          <Icons.download className="h-3.5 w-3.5" />
+                          {mapping.extraPhotos.length} foto tanpa jam → disalin ke “Tanpa jam”
                         </span>
                       )}
                     </div>

@@ -13,6 +13,7 @@ export function ResultPanel({ output }: ResultPanelProps) {
   const { summary, results, outputFolderName } = output;
   const failures = results.filter((result) => result.status === 'failed');
   const successes = results.filter((result) => result.status === 'success');
+  const copied = results.filter((result) => result.status === 'copied');
 
   return (
     <Card
@@ -32,13 +33,19 @@ export function ResultPanel({ output }: ResultPanelProps) {
         )
       }
     >
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Total" value={summary.total} tone="slate" hint="photos processed" />
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <StatCard label="Total" value={summary.total} tone="slate" hint="semua foto" />
         <StatCard
           label="Successful"
           value={summary.successful}
           tone={summary.successful > 0 ? 'emerald' : 'slate'}
           hint="saved with timestamp"
+        />
+        <StatCard
+          label="Copied as-is"
+          value={summary.copied}
+          tone={summary.copied > 0 ? 'amber' : 'slate'}
+          hint="tanpa jam — di subfolder “Tanpa jam”"
         />
         <StatCard
           label="Failed"
@@ -87,10 +94,30 @@ export function ResultPanel({ output }: ResultPanelProps) {
         </div>
       )}
 
+      {copied.length > 0 && (
+        <div className="mt-5 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
+            Disalin apa adanya tanpa timestamp ({copied.length})
+          </p>
+          <TableShell headers={['Photo', 'Saved as']} maxHeight="max-h-64">
+            {copied.map((result, index) => (
+              <tr key={`${result.filename}-${index}`} className="bg-white hover:bg-amber-50/40">
+                <td className="px-4 py-2 text-slate-700">
+                  <span className="block max-w-[280px] truncate">{result.filename}</span>
+                </td>
+                <td className="px-4 py-2 font-mono text-xs text-amber-700">
+                  {result.outputFilename}
+                </td>
+              </tr>
+            ))}
+          </TableShell>
+        </div>
+      )}
+
       <p className="mt-5 flex items-start gap-2 text-xs text-slate-500">
         <Icons.info className="mt-0.5 h-4 w-4 shrink-0 text-sky-500" />
-        The processed photos are saved in the “{outputFolderName}” folder you selected. Open it in
-        your file manager to review the results.
+        Hasil disimpan di folder “{outputFolderName}” yang Anda pilih. Foto yang tidak punya
+        pasangan jam ada di subfolder “Tanpa jam” di dalamnya, disalin apa adanya.
       </p>
     </Card>
   );

@@ -40,7 +40,8 @@ export interface ProcessingSettings {
   position: TimestampPosition;
 }
 
-export type ProcessingStatus = 'success' | 'failed';
+/** `copied` = extra photo saved as-is (no matching time row). */
+export type ProcessingStatus = 'success' | 'failed' | 'copied';
 
 /** Outcome for one photo in the batch (§33). */
 export interface BatchResult {
@@ -61,6 +62,8 @@ export interface BatchSummary {
   total: number;
   successful: number;
   failed: number;
+  /** Extra photos copied as-is because they had no time row. */
+  copied: number;
 }
 
 export interface BatchOutput {

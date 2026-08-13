@@ -103,6 +103,8 @@ export async function pickInputFolder(): Promise<FolderSelection> {
 export interface OutputFolder {
   name: string;
   write(filename: string, blob: Blob): Promise<void>;
+  /** Create (or reuse) a subfolder inside this output folder. */
+  subfolder(name: string): Promise<OutputFolder>;
 }
 
 /**
@@ -152,6 +154,9 @@ function createOutputFolder(handle: FSDirectoryHandle): OutputFolder {
           `Could not save "${filename}": ${error instanceof Error ? error.message : 'write failed'}`,
         );
       }
+    },
+    subfolder(name: string): Promise<OutputFolder> {
+      return createSubfolder(handle, name);
     },
   };
 }
