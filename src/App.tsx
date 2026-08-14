@@ -1,17 +1,18 @@
 /**
  * App shell — SaaS-style layout: dark workflow sidebar + sticky header with
- * step context, driving the seven-step flow:
+ * step context, driving the eight-step flow:
  *
- *   1. List Jam   — paste the Google Spreadsheet link (source of the times)
- *   2. Foto       — pick the local folder with the raw photos
- *   3. Atur Timestamp — pilih posisi timestamp; crop 1:1 opsional untuk semua foto
- *   4. Tanggal    — date from a spreadsheet column or one manual value
- *   5. Kolom Jam  — worksheet / rows / time source + review mapping
- *   6. Proses     — run the batch into a chosen output folder
- *   7. Hasil      — summary of what was saved
+ *   1. List Jam      — paste the Google Spreadsheet link (source of the times)
+ *   2. Foto          — pick the local folder with the raw photos
+ *   3. Atur Lokasi   — choose location zones for randomization
+ *   4. Atur Timestamp — choose timestamp position and optional crop
+ *   5. Tanggal       — date from a spreadsheet column or one manual value
+ *   6. Kolom Jam     — worksheet / rows / time source + review mapping
+ *   7. Proses        — run the batch into a chosen output folder
+ *   8. Hasil         — summary of what was saved
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import type { ImportedSheet, RowSelection } from './types/spreadsheet';
 import { EMPTY_SELECTION } from './types/spreadsheet';
 import type { BatchOutput, BatchProgress, CropTemplate, TimestampPosition } from './types/processing';
@@ -51,6 +52,14 @@ import { MappingPreview } from './components/MappingPreview/MappingPreview';
 import { ProcessingProgress } from './components/ProcessingProgress/ProcessingProgress';
 import { ResultPanel } from './components/ResultPanel/ResultPanel';
 import { QuickMode } from './components/QuickMode/QuickMode';
+import { LocationInput } from './components/LocationInput/LocationInput';
+import { PositionPicker } from './components/PositionPicker/PositionPicker';
+import type { LocationData } from './components/LocationInput/LocationInput';
+import { LocationList } from './components/LocationList/LocationList';
+import type { Address, Location, ZoneAddressEntry, ZoneFeaturePool } from './types/location';
+import { getLocationManager } from './services/locationManager';
+import { detectZoneFeatures } from './services/geocoder/overpass';
+import type { OverpassZoneFeature } from './services/geocoder/overpass';
 
 const STEPS = [
   {
@@ -62,6 +71,11 @@ const STEPS = [
     title: 'Foto',
     subtitle: 'Pilih folder berisi foto mentah',
     icon: Icons.image,
+  },
+  {
+    title: 'Atur Lokasi',
+    subtitle: 'Tentukan zone area untuk random lokasi',
+    icon: Icons.mapPin,
   },
   {
     title: 'Atur Timestamp',
@@ -90,10 +104,117 @@ const STEPS = [
   },
 ] as const;
 
-type StepIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+type StepIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 function runStamp(): string {
   return new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-');
+}
+
+/**
+ * Map Overpass zone features into the app's Address shape (best-effort).
+ * Indonesian OSM admin levels vary; the mapping below covers the common ones:
+ * 4 = provinsi, 5-7 = kabupaten/kota, 8-10 = kecamatan/kelurahan.
+ */
+function zoneFeaturesToAddress(
+  features: OverpassZoneFeature[],
+  fallbackFullAddress: string,
+): Address {
+  const road = features.find((f) => f.kind === 'road');
+  const adminByLevels = (levels: string[]): string =>
+    features.find(
+      (f) => f.kind === 'admin' && f.adminLevel !== undefined && levels.includes(f.adminLevel),
+    )?.name ?? '';
+
+  const street = road?.name ?? '';
+  const kecamatan = adminByLevels(['8', '9', '10']);
+  const kabupaten = adminByLevels(['5', '6', '7']);
+  const provinsi = adminByLevels(['4']);
+  const parts = [street, kecamatan, kabupaten, provinsi].filter((p) => p.trim().length > 0);
+
+  return {
+    street,
+    kecamatan,
+    kabupaten,
+    provinsi,
+    fullAddress: parts.length > 0 ? parts.join(', ') : fallbackFullAddress,
+  };
+}
+
+/** Collect matching feature names, trimmed, deduplicated, empties dropped. */
+function uniqueFeatureNames(
+  features: OverpassZoneFeature[],
+  matches: (feature: OverpassZoneFeature) => boolean,
+): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const feature of features) {
+    if (!matches(feature)) continue;
+    const name = feature.name.trim();
+    if (name === '' || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Group detected Overpass features into a pool that the batch processor
+ * expands into one unique address per photo. Indonesian admin levels:
+ * 4 = provinsi, 5-7 = kabupaten/kota, 8-10 = kecamatan/kelurahan.
+ */
+function zoneFeaturePoolFrom(features: OverpassZoneFeature[]): ZoneFeaturePool {
+  const addresses: ZoneAddressEntry[] = [];
+  const seenAddresses = new Set<string>();
+  for (const feature of features) {
+    if (feature.kind !== 'address') continue;
+    const street = (feature.street ?? feature.name).trim();
+    if (street === '') continue;
+    const houseNumber = feature.houseNumber?.trim() ?? '';
+    const key = `${houseNumber}|${street}`;
+    if (seenAddresses.has(key)) continue;
+    seenAddresses.add(key);
+    const entry: ZoneAddressEntry = { street };
+    if (houseNumber !== '') entry.houseNumber = houseNumber;
+    addresses.push(entry);
+  }
+
+  const adminAt = (levels: string[]) => (feature: OverpassZoneFeature) =>
+    feature.kind === 'admin' && feature.adminLevel !== undefined && levels.includes(feature.adminLevel);
+
+  return {
+    addresses,
+    roads: uniqueFeatureNames(features, (feature) => feature.kind === 'road'),
+    kecamatan: uniqueFeatureNames(features, adminAt(['8', '9', '10'])),
+    kabupaten: uniqueFeatureNames(features, adminAt(['5', '6', '7'])),
+    provinsi: uniqueFeatureNames(features, adminAt(['4'])),
+  };
+}
+
+/**
+ * Core zone enrichment (module-level so hooks can call it without dependency
+ * churn): detect OSM features inside the zone radius, then rebuild the stored
+ * address and feature pool. Returns the updated location, or null for
+ * radius-less point locations.
+ */
+async function enrichZoneAddressCore(
+  manager: { update: (id: string | number, updates: Partial<Location>) => Location },
+  location: Location,
+): Promise<Location | null> {
+  if (location.radiusMeters === undefined) return null;
+  // The Overpass service caps detection radius at 10 km.
+  const radius = Math.min(location.radiusMeters, 10000);
+  const { features } = await detectZoneFeatures(
+    { lat: location.coordinates.lat, lng: location.coordinates.lng },
+    radius,
+  );
+  const address = zoneFeaturesToAddress(features, location.address.fullAddress);
+  const zoneFeatures = zoneFeaturePoolFrom(features);
+  return manager.update(location.id, { address, zoneFeatures });
+}
+
+/** Replace one location in the state list by id. */
+function mergeUpdatedLocation(prev: Location[], updated: Location): Location[] {
+  return prev.map((loc) => (loc.id === updated.id ? updated : loc));
 }
 
 /** Empty sheet stand-in so a fully manual run needs no spreadsheet at all. */
@@ -171,6 +292,12 @@ export default function App() {
   const [folder, setFolder] = useState<FolderSelection | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
 
+  // Step 3 — location zones for random area selection
+  const [locationManager] = useState(() => getLocationManager());
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [selectedLocationIds, setSelectedLocationIds] = useState<Set<string | number>>(new Set());
+  const [randomLocation, setRandomLocation] = useState<Location | null>(null);
+
   // Step 3 — crop template
   const [template, setTemplate] = useState<CropTemplate | null>(null);
 
@@ -196,12 +323,16 @@ export default function App() {
   const formatId = DEFAULT_FORMAT_ID;
   /** Where the timestamp text is anchored on the final (cropped) photo. */
   const [position, setPosition] = useState<TimestampPosition>('bottom-right');
+  /** Where the location overlay is anchored on the final photo. */
+  const [locationPosition, setLocationPosition] = useState<TimestampPosition>('top-left');
 
   // Steps 6/7 — batch run
   const [progress, setProgress] = useState<BatchProgress | null>(null);
   const [output, setOutput] = useState<BatchOutput | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const runIdRef = useRef(0);
+  /** Ensures the location-manager init effect runs only once. */
+  const locationsInitializedRef = useRef(false);
 
   const folderSupported = supportsFolderAccess();
 
@@ -405,6 +536,7 @@ export default function App() {
 
     const runId = ++runIdRef.current;
     setProgress({ total: mapping.entries.length + mapping.extraPhotos.length, processed: 0 });
+    const selectedLocations = locations.filter((location) => selectedLocationIds.has(location.id));
     try {
       const result = await processBatch(mapping.entries, {
         crop: template,
@@ -412,14 +544,17 @@ export default function App() {
         position,
         outputFolder,
         extraPhotos: mapping.extraPhotos,
+        locations: selectedLocations,
+        locationEnabled: selectedLocations.length > 0,
+        locationPosition,
         onProgress: (p) => {
           if (runIdRef.current === runId) setProgress(p);
         },
       });
       if (runIdRef.current !== runId) return;
-      setOutput(result);
-      setProgress(null);
-      setStep(6);
+       setOutput(result);
+       setProgress(null);
+       setStep(7);
     } catch (error) {
       setProgress(null);
       setBatchError(
@@ -456,22 +591,123 @@ export default function App() {
   const missing: { label: string; step: StepIndex }[] = [];
   if (!sheet) missing.push({ label: 'Spreadsheet belum dimuat', step: 0 });
   if (photos.length === 0) missing.push({ label: 'Folder foto belum dipilih', step: 1 });
-  if (selection.dateSource === 'sheet') {
-    if (selection.dateColumn === null)
-      missing.push({ label: 'Kolom tanggal belum dipilih', step: 3 });
-  } else if (!dateValid) {
-    missing.push({ label: 'Tanggal manual belum diisi / tidak valid', step: 3 });
-  }
-  if (selection.timeSource === 'sheet') {
-    if (selection.timeColumn === null)
-      missing.push({ label: 'Kolom jam belum dipilih', step: 4 });
-  } else if (!timeValid) {
-    missing.push({ label: 'Jam manual belum diisi / tidak valid', step: 4 });
-  }
-  if (selection.matchMode === 'byName' && selection.nameColumn === null)
-    missing.push({ label: 'Kolom nama belum dipilih', step: 4 });
-  if (sheet && photos.length > 0 && (!mapping || mapping.entries.length === 0))
-    missing.push({ label: 'Belum ada pasangan foto ↔ jam', step: 4 });
+  if (selectedLocationIds.size === 0) missing.push({ label: 'Belum ada zone lokasi yang dipilih', step: 2 });
+   if (selection.dateSource === 'sheet') {
+     if (selection.dateColumn === null)
+       missing.push({ label: 'Kolom tanggal belum dipilih', step: 4 });
+   } else if (!dateValid) {
+     missing.push({ label: 'Tanggal manual belum diisi / tidak valid', step: 4 });
+   }
+   if (selection.timeSource === 'sheet') {
+     if (selection.timeColumn === null)
+       missing.push({ label: 'Kolom jam belum dipilih', step: 5 });
+   } else if (!timeValid) {
+     missing.push({ label: 'Jam manual belum diisi / tidak valid', step: 5 });
+   }
+   if (selection.matchMode === 'byName' && selection.nameColumn === null)
+     missing.push({ label: 'Kolom nama belum dipilih', step: 5 });
+   if (sheet && photos.length > 0 && (!mapping || mapping.entries.length === 0))
+     missing.push({ label: 'Belum ada pasangan foto ↔ jam', step: 5 });
+
+  /* ------------------------- step 3: location zones --------------------- */
+
+  const handleSaveLocation = (locationData: LocationData) => {
+    (async () => {
+      try {
+        const displayName = locationData.displayName.trim();
+        const location = await locationManager.addByCoordinates(
+          { lat: locationData.latitude, lng: locationData.longitude },
+          displayName || locationData.areaName,
+          locationData.radiusMeters,
+          locationData.address,
+        );
+        setLocations((prev) => [...prev, location]);
+        await enrichZoneAddress(location);
+      } catch (error) {
+        console.error('Failed to save location:', error);
+      }
+    })();
+  };
+
+  /**
+   * Best-effort enrichment: after a zone is saved, detect named roads and
+   * administrative areas inside the circle via Overpass and replace the
+   * stored address with real data. Failures keep the existing address.
+   */
+  const enrichZoneAddress = async (location: Location): Promise<void> => {
+    try {
+      const updated = await enrichZoneAddressCore(locationManager, location);
+      if (updated !== null) {
+        setLocations((prev) => mergeUpdatedLocation(prev, updated));
+      }
+    } catch (error) {
+      console.warn('Zone feature detection failed; keeping the saved address.', error);
+    }
+  };
+
+  // Initialize location manager once on mount, then re-enrich zones saved
+  // before feature-pool support existed so they can still expand into unique
+  // per-photo addresses.
+  useEffect(() => {
+    if (locationsInitializedRef.current) return;
+    locationsInitializedRef.current = true;
+    (async () => {
+      try {
+        await locationManager.initialize();
+        const loaded = locationManager.getAll();
+        setLocations(loaded);
+        for (const location of loaded) {
+          if (location.radiusMeters !== undefined && !location.zoneFeatures) {
+            try {
+              const updated = await enrichZoneAddressCore(locationManager, location);
+              if (updated !== null) {
+                setLocations((prev) => mergeUpdatedLocation(prev, updated));
+              }
+            } catch (error) {
+              console.warn('Zone re-enrichment failed; keeping the saved address.', error);
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to initialize location manager:', error);
+      }
+    })();
+  }, [locationManager]);
+
+  const handleToggleLocationSelection = (id: string | number, isSelected: boolean) => {
+    setSelectedLocationIds(prev => {
+      const next = new Set(prev);
+      if (isSelected) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteLocation = (id: string | number) => {
+    locationManager.remove(id);
+    setLocations(prev => prev.filter(loc => loc.id !== id));
+    setSelectedLocationIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    if (randomLocation?.id === id) {
+      setRandomLocation(null);
+    }
+  };
+
+  const handleRandomize = () => {
+    if (selectedLocationIds.size === 0 || locations.length === 0) return;
+    
+    const selected = locations.filter(loc => selectedLocationIds.has(loc.id));
+    if (selected.length === 0) return;
+    
+    const randomIndex = Math.floor(Math.random() * selected.length);
+    setRandomLocation(selected[randomIndex]);
+  };
 
   const stepDone = (index: StepIndex): boolean => {
     switch (index) {
@@ -480,12 +716,14 @@ export default function App() {
       case 1:
         return photos.length > 0;
       case 2:
-        return true; // posisi timestamp selalu siap; crop opsional
+        return selectedLocationIds.size > 0; // At least one location selected
       case 3:
-        return dateReady;
+        return true; // posisi timestamp selalu siap; crop opsional
       case 4:
-        return timeReady && !!mapping && mapping.entries.length > 0;
+        return dateReady;
       case 5:
+        return timeReady && !!mapping && mapping.entries.length > 0;
+      case 6:
         return !!output;
       default:
         return false;
@@ -717,7 +955,7 @@ export default function App() {
               icon={activeMeta.icon}
               title={activeMeta.title}
               description={activeMeta.subtitle}
-              badge={step === 6 ? 'Batch selesai' : undefined}
+               badge={step === 7 ? 'Batch selesai' : undefined}
             />
 
             <div key={step} className="anim-step space-y-6">
@@ -781,10 +1019,10 @@ export default function App() {
                       Hint: belum ada folder terpilih — crop butuh foto sebagai preview.
                     </p>
                   )}
-                  <Button onClick={() => setStep(2)}>
-                    Lanjut ke crop
-                    <Icons.arrowRight className="h-4 w-4" />
-                  </Button>
+                   <Button onClick={() => setStep(2)}>
+                     Lanjut ke lokasi
+                     <Icons.arrowRight className="h-4 w-4" />
+                   </Button>
                 </div>
               </>
             )}
@@ -793,30 +1031,89 @@ export default function App() {
               <>
                 <Guide
                   steps={[
-                    'Pilih posisi timestamp (6 titik) — kotak “timestamp” di preview menunjukkan letaknya.',
-                    'Crop 1:1 opsional: aktifkan toggle bila ingin semua foto dipotong perse.',
-                    'Geser kotak putih ke area yang diinginkan, tarik sudut kanan bawah untuk mengubah ukuran.',
-                    'Klik “Confirm crop” bila memakai crop — tanpa crop pun langkah ini langsung siap.',
+                    'Tambahkan area/zone yang akan digunakan untuk random lokasi.',
+                    'Klik "Simpan Lokasi" setelah memasukkan nama area atau koordinat.',
+                    'Centang zone yang ingin digunakan untuk randomisasi.',
+                    'Klik "Random Zone" untuk mendapatkan lokasi acak dari zone yang dipilih.',
+                    'Lokasi random akan ditampilkan dan siap digunakan di proses selanjutnya.',
                   ]}
                 />
-                <CropEditor
-                  photos={photos}
-                  template={template}
-                  onConfirm={(t) => {
-                    setTemplate(t);
-                    setStep(3);
-                  }}
-                  position={position}
-                  onPositionChange={setPosition}
-                  disabled={!!progress}
-                />
+                
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <LocationInput onSave={handleSaveLocation} initialMode="area" disabled={!!progress} />
+                  
+                  <LocationList
+                    locations={locations}
+                    selectedIds={selectedLocationIds}
+                    onToggle={handleToggleLocationSelection}
+                    onDelete={handleDeleteLocation}
+                    maxSelection={0} // unlimited selection
+                    title="Zone Area"
+                    subtitle="Pilih zone yang akan digunakan untuk random"
+                  />
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm shadow-slate-900/5">
+                  <PositionPicker
+                    label="Posisi lokasi di foto"
+                    value={locationPosition}
+                    onChange={setLocationPosition}
+                    disabled={!!progress}
+                    hint={
+                      locationPosition === position
+                        ? 'Posisi sama dengan timestamp — keduanya digabung jadi satu blok: timestamp dulu, lalu lokasi di bawahnya.'
+                        : 'Pilih sudut tempat teks lokasi ditempel pada tiap foto.'
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between gap-4 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-indigo-900">
+                      Random Lokasi Terpilih
+                    </p>
+                    {randomLocation ? (
+                      <div className="mt-2 flex items-start gap-3">
+                        <Icons.mapPin className="h-5 w-5 shrink-0 text-indigo-600 mt-0.5" />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-indigo-900">{randomLocation.areaName}</p>
+                          <p className="text-xs text-indigo-600">
+                            {randomLocation.coordinates.lat.toFixed(6)}, {randomLocation.coordinates.lng.toFixed(6)}
+                          </p>
+                          <p className="text-xs text-indigo-500 mt-1">
+                            {randomLocation.address.fullAddress}
+                          </p>
+                        </div>
+                        <button
+                          className="ml-auto px-3 py-1 text-xs rounded-lg bg-white hover:bg-slate-50 text-slate-600 font-medium border border-slate-200"
+                          type="button"
+                          onClick={() => setRandomLocation(null)}
+                          disabled={!!progress}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-indigo-600 mt-2">
+                        Belum ada zone yang dipilih — centang zone di daftar untuk memulai random.
+                      </p>
+                    )}
+                  </div>
+                  <Button
+                    onClick={handleRandomize}
+                    disabled={selectedLocationIds.size === 0 || !!progress}
+                  >
+                    🎲 Random Zone
+                  </Button>
+                </div>
+
                 <div className="flex items-center justify-between gap-3">
                   <Button variant="secondary" onClick={() => setStep(1)}>
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
                   <Button onClick={() => setStep(3)}>
-                    Lanjut ke tanggal
+                    Lanjut ke crop
                     <Icons.arrowRight className="h-4 w-4" />
                   </Button>
                 </div>
@@ -824,6 +1121,45 @@ export default function App() {
             )}
 
             {step === 3 && (
+              <>
+                <Guide
+                  steps={[
+                    'Pilih posisi timestamp (6 titik) — kotak "timestamp" di preview menunjukkan letaknya.',
+                    'Crop 1:1 opsional: aktifkan toggle bila ingin semua foto dipotong persegi.',
+                    'Geser kotak putih ke area yang diinginkan, tarik sudut kanan bawah untuk mengubah ukuran.',
+                    'Klik "Confirm crop" bila memakai crop — tanpa crop pun langkah ini langsung siap.',
+                  ]}
+                />
+                <CropEditor
+                  photos={photos}
+                  template={template}
+                  onConfirm={(t) => {
+                    setTemplate(t);
+                    setStep(4);
+                  }}
+                  position={position}
+                  onPositionChange={setPosition}
+                  disabled={!!progress}
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <Button variant="secondary" onClick={() => setStep(2)}>
+                    <Icons.arrowLeft className="h-4 w-4" />
+                    Kembali
+                  </Button>
+                  {!template && (
+                    <p className="text-xs text-slate-400">
+                      Hint: crop opsional — klik lanjut jika sudah siap.
+                    </p>
+                  )}
+                  <Button onClick={() => setStep(4)}>
+                    Lanjut ke tanggal
+                    <Icons.arrowRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {step === 4 && (
               <>
                 <Guide
                   steps={[
@@ -846,7 +1182,7 @@ export default function App() {
                   disabled={!!progress}
                 />
                 <div className="flex items-center justify-between gap-3">
-                  <Button variant="secondary" onClick={() => setStep(2)}>
+                  <Button variant="secondary" onClick={() => setStep(3)}>
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
@@ -857,7 +1193,7 @@ export default function App() {
                         : 'kolom tanggal belum dipilih.'}
                     </p>
                   )}
-                  <Button onClick={() => setStep(4)}>
+                  <Button onClick={() => setStep(5)}>
                     Lanjut ke kolom jam
                     <Icons.arrowRight className="h-4 w-4" />
                   </Button>
@@ -865,7 +1201,7 @@ export default function App() {
               </>
             )}
 
-            {step === 4 && (
+            {step === 5 && (
               <>
                 <Guide
                   steps={[
@@ -948,11 +1284,11 @@ export default function App() {
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <Button variant="secondary" onClick={() => setStep(3)}>
+                  <Button variant="secondary" onClick={() => setStep(4)}>
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
-                  <Button onClick={() => setStep(5)}>
+                  <Button onClick={() => setStep(6)}>
                     Lanjut ke proses
                     <Icons.arrowRight className="h-4 w-4" />
                   </Button>
@@ -960,14 +1296,14 @@ export default function App() {
               </>
             )}
 
-            {step === 5 && (
+            {step === 6 && (
               <>
                 <Guide
                   steps={[
                     'Periksa checklist kesiapan — item yang kurang bisa langsung diklik untuk dilengkapi.',
                     'Klik tombol proses lalu pilih folder tujuan.',
-                    'Aplikasi membuat subfolder “Processed …” dan menyimpan hasil di sana.',
-                    'Foto tanpa pasangan jam ikut tersimpan apa adanya di subfolder “Tanpa jam”.',
+                    'Aplikasi membuat subfolder "Processed …" dan menyimpan hasil di sana.',
+                    'Foto tanpa pasangan jam ikut tersimpan apa adanya di subfolder "Tanpa jam".',
                     'Pantau progres secara langsung; hasil akhir tampil di langkah 7.',
                   ]}
                 />
@@ -1011,7 +1347,7 @@ export default function App() {
                           {mapping.extraPhotos.length > 0 && (
                             <span className="font-normal text-slate-500">
                               {' '}+ {mapping.extraPhotos.length} foto tanpa jam akan disalin apa
-                              adanya ke subfolder “Tanpa jam”.
+                              adanya ke subfolder "Tanpa jam".
                             </span>
                           )}
                         </span>
@@ -1032,7 +1368,7 @@ export default function App() {
                               )
                             : '-'
                           : dateColumnLabel
-                            ? `kolom “${dateColumnLabel}”`
+                            ? `kolom "${dateColumnLabel}"`
                             : '-'}
                       </span>
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1.5 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200/60">
@@ -1043,16 +1379,12 @@ export default function App() {
                             ? timeInput.trim()
                             : '-'
                           : timeColumnLabel
-                            ? `kolom “${timeColumnLabel}”`
+                            ? `kolom "${timeColumnLabel}"`
                             : '-'}
                       </span>
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 font-semibold text-slate-600 ring-1 ring-inset ring-slate-200/60">
                         <Icons.image className="h-3.5 w-3.5" />
                         {mapping.entries.length} foto siap
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 font-semibold text-slate-600 ring-1 ring-inset ring-slate-200/60">
-                        <Icons.settings className="h-3.5 w-3.5" />
-                        Crop template aktif
                       </span>
                       {mapping.counts.invalidRows > 0 && (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1.5 font-semibold text-red-700 ring-1 ring-inset ring-red-200/60">
@@ -1063,7 +1395,7 @@ export default function App() {
                       {mapping.extraPhotos.length > 0 && (
                         <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 font-semibold text-amber-700 ring-1 ring-inset ring-amber-200/60">
                           <Icons.download className="h-3.5 w-3.5" />
-                          {mapping.extraPhotos.length} foto tanpa jam → disalin ke “Tanpa jam”
+                          {mapping.extraPhotos.length} foto tanpa jam → disalin ke "Tanpa jam"
                         </span>
                       )}
                     </div>
@@ -1074,7 +1406,7 @@ export default function App() {
                 {batchError && <ErrorBanner message={batchError} />}
 
                 <div className="flex justify-between">
-                  <Button variant="secondary" onClick={() => setStep(4)} disabled={!!progress}>
+                  <Button variant="secondary" onClick={() => setStep(5)} disabled={!!progress}>
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
@@ -1097,20 +1429,20 @@ export default function App() {
               </>
             )}
 
-            {step === 6 && (
+            {step === 7 && (
               <>
                 <Guide
                   steps={[
                     'Lihat ringkasan: total, sukses, dan gagal beserta alasannya.',
-                    'File hasil ada di subfolder “Processed …” yang tadi dibuat.',
-                    'Klik “Mulai batch baru” untuk mengosongkan semua dan mulai lagi.',
+                    'File hasil ada di subfolder "Processed …" yang tadi dibuat.',
+                    'Klik "Mulai batch baru" untuk mengosongkan semua dan mulai lagi.',
                   ]}
                 />
                 {output ? (
                   <>
                     <ResultPanel output={output} />
                     <div className="flex justify-between">
-                      <Button variant="secondary" onClick={() => setStep(5)}>
+                      <Button variant="secondary" onClick={() => setStep(6)}>
                         <Icons.arrowLeft className="h-4 w-4" />
                         Kembali ke proses
                       </Button>
@@ -1128,10 +1460,10 @@ export default function App() {
                         Belum ada hasil batch
                       </p>
                       <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
-                        Jalankan proses dulu di langkah 6. Setelah selesai, ringkasan hasil akan
+                        Jalankan proses dulu di langkah 7. Setelah selesai, ringkasan hasil akan
                         tampil di sini.
                       </p>
-                      <Button variant="secondary" className="mt-4" onClick={() => setStep(5)}>
+                      <Button variant="secondary" className="mt-4" onClick={() => setStep(6)}>
                         <Icons.refresh className="h-4 w-4" />
                         Ke langkah Proses
                       </Button>
@@ -1140,6 +1472,8 @@ export default function App() {
                 )}
               </>
             )}
+
+
             </div>
           </div>
         </main>

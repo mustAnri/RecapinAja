@@ -33,3 +33,10 @@ tmp_photos/
 *.png
 *.webp
 *.heic
+
+# JCE context index runtime state
+.opencode-jce/context/
+
+# Local agent/session artifacts
+.claude/
+.opencode-context.md

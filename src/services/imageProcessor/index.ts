@@ -14,6 +14,9 @@ import {
   type TimestampStyle,
 } from './timestampStyle';
 
+// Re-export location overlay functionality
+export * from './locationOverlay';
+
 export class ImageProcessingError extends Error {}
 
 export interface ProcessPhotoOptions {
@@ -27,6 +30,11 @@ export interface ProcessPhotoOptions {
   jpegQuality?: number;
   /** Optional hard cap for the output side length in pixels. */
   maxOutputSize?: number;
+  /**
+   * Skip drawing the timestamp overlay (used when the caller renders a
+   * combined timestamp + location block in a later pass instead).
+   */
+  skipTimestamp?: boolean;
 }
 
 export interface ProcessedPhoto {
@@ -253,7 +261,9 @@ export async function processPhoto(
 
     ctx.drawImage(image, sx, sy, sourceW, sourceH, 0, 0, outW, outH);
 
-    drawTimestamp(ctx, outW, outH, options.timestamp, position, style);
+    if (!options.skipTimestamp) {
+      drawTimestamp(ctx, outW, outH, options.timestamp, position, style);
+    }
 
     const mimeType = outputMimeType(file.name);
     const blob = await new Promise<Blob | null>((resolve) => {
