@@ -1,0 +1,530 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import type { GeocodingProvider, Coordinates } from '../../types/location';
+import {
+  LocationManager,
+  getLocationManager,
+  LocationError,
+  LocationNotFoundError,
+  NominatimGeocodingError,
+  StorageError,
+} from './index';
+
+// Mock geocoding provider for testing
+class MockGeocoder implements GeocodingProvider {
+  constructor(
+    public shouldFailForward = false,
+    public shouldFailReverse = false,
+  ) {}
+
+  async forwardGeocode(query: string) {
+    if (this.shouldFailForward) {
+      return {
+        success: false,
+        error: 'Geocoding failed',
+      };
+    }
+    
+    return {
+      success: true,
+      coordinates: { lat: -6.2088, lng: 106.8456 },
+      formattedAddress: `${query}, Indonesia`,
+    };
+  }
+
+  async reverseGeocode(coords: Coordinates) {
+    if (this.shouldFailReverse) {
+      return {
+        success: false,
+        error: 'Reverse geocoding failed',
+      };
+    }
+    
+    return {
+      success: true,
+      address: {
+        street: 'Jalan Test',
+        kecamatan: 'Kebayoran Baru',
+        kabupaten: 'Jakarta Selatan',
+        provinsi: 'DKI Jakarta',
+        fullAddress: 'Jalan Test, Kebayoran Baru, Jakarta Selatan, DKI Jakarta',
+      },
+      formattedAddress: 'Jalan Test, Kebayoran Baru, Jakarta Selatan, DKI Jakarta',
+    };
+  }
+}
+
+describe('LocationManager', () => {
+  let manager: LocationManager;
+  let mockGeocoder: MockGeocoder;
+  let localStorageMock: { [key: string]: string };
+
+  // Setup in-memory localStorage mock
+  beforeEach(() => {
+    localStorageMock = {};
+    global.localStorage = {
+      getItem: vi.fn((key: string) => localStorageMock[key] || null),
+      setItem: vi.fn((key: string, value: string) => {
+        localStorageMock[key] = value;
+      }),
+      removeItem: vi.fn((key: string) => {
+        delete localStorageMock[key];
+      }),
+      clear: vi.fn(() => {
+        Object.keys(localStorageMock).forEach((key) => {
+          delete localStorageMock[key];
+        });
+      }),
+    } as unknown as Storage;
+
+    mockGeocoder = new MockGeocoder();
+    manager = LocationManager.getInstance(mockGeocoder);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe('initialization', () => {
+    it('should initialize with empty store when no localStorage data exists', async () => {
+      await manager.initialize();
+      
+      expect(manager.getCount()).toBe(0);
+      expect(manager.getAll()).toEqual([]);
+    });
+
+    it('should load locations from localStorage when data exists', async () => {
+      const mockLocations = [
+        {
+          id: 'test-1',
+          areaName: 'Test Location 1',
+          coordinates: { lat: -6.2, lng: 106.8 },
+          address: {
+            street: 'Jalan Test 1',
+            kecamatan: 'Kecamatan 1',
+            kabupaten: 'Kabupaten 1',
+            provinsi: 'Provinsi 1',
+            fullAddress: 'Full Address 1',
+          },
+          updatedAt: '2024-01-15T10:00:00Z',
+        },
+      ];
+
+      const storedData = {
+        locations: mockLocations,
+        lastUpdated: '2024-01-15T10:00:00Z',
+      };
+
+      localStorageMock['rekap-test-drive-locations'] = JSON.stringify(storedData);
+
+      await manager.initialize();
+
+      expect(manager.getCount()).toBe(1);
+      expect(manager.getAll()).toHaveLength(1);
+      expect(manager.getAll()[0].areaName).toBe('Test Location 1');
+    });
+
+    it('should handle invalid JSON gracefully', async () => {
+      localStorageMock['rekap-test-drive-locations'] = 'invalid json';
+
+      // Should not throw, but log warning and continue with empty store
+      await expect(manager.initialize()).resolves.toBeUndefined();
+      expect(manager.getCount()).toBe(0);
+    });
+  });
+
+  describe('adding by area name (forward geocoding)', () => {
+    it('should add location successfully using forward geocoding', async () => {
+      await manager.initialize();
+      
+      const result = await manager.addByAreaName('Monas Jakarta');
+      
+      expect(result).toBeDefined();
+      expect(result.areaName).toBe('Monas Jakarta');
+      expect(result.coordinates.lat).toBe(-6.2088);
+      expect(result.coordinates.lng).toBe(106.8456);
+      expect(result.id).toBeDefined();
+      expect(manager.getCount()).toBe(1);
+    });
+
+    it('should throw error for empty area name', async () => {
+      await manager.initialize();
+      
+      await expect(() => manager.addByAreaName('')).rejects.toThrow(LocationError);
+      await expect(() => manager.addByAreaName('   ')).rejects.toThrow(LocationError);
+      await expect(() => manager.addByAreaName(null as any)).rejects.toThrow(LocationError);
+    });
+
+    it('should throw GeocodingError when forward geocoding fails', async () => {
+      mockGeocoder = new MockGeocoder(true); // should fail forward
+      manager = LocationManager.getInstance(mockGeocoder);
+      
+      await manager.initialize();
+      
+      await expect(manager.addByAreaName('Invalid Location'))
+        .rejects
+        .toThrow(NominatimGeocodingError);
+    });
+  });
+
+  describe('adding by coordinates (reverse geocoding)', () => {
+    it('should add location successfully using reverse geocoding', async () => {
+      await manager.initialize();
+      
+      const coords: Coordinates = { lat: -6.2, lng: 106.8 };
+      const result = await manager.addByCoordinates(coords, 'Custom Location');
+      
+      expect(result).toBeDefined();
+      expect(result.areaName).toBe('Custom Location');
+      expect(result.coordinates.lat).toBe(-6.2);
+      expect(result.coordinates.lng).toBe(106.8);
+      expect(manager.getCount()).toBe(1);
+    });
+
+    it('should use coordinates as fallback area name when not provided', async () => {
+      await manager.initialize();
+      
+      const coords: Coordinates = { lat: -6.5, lng: 106.9 };
+      const result = await manager.addByCoordinates(coords);
+      
+      expect(result.areaName).toContain('-6.5');
+      expect(result.areaName).toContain('106.9');
+    });
+
+    it('should throw LocationError for invalid coordinates', async () => {
+      await manager.initialize();
+      
+      // Invalid latitude
+      await expect(() => 
+        manager.addByCoordinates({ lat: 100, lng: 106.8 })
+      ).rejects.toThrow(LocationError);
+      
+      // Invalid longitude
+      await expect(() => 
+        manager.addByCoordinates({ lat: -6.2, lng: 200 })
+      ).rejects.toThrow(LocationError);
+    });
+
+    it('should throw GeocodingError when reverse geocoding fails', async () => {
+      mockGeocoder = new MockGeocoder(false, true); // should fail reverse
+      manager = LocationManager.getInstance(mockGeocoder);
+      
+      await manager.initialize();
+      
+      await expect(manager.addByCoordinates({ lat: -6.2, lng: 106.8 }))
+        .rejects
+        .toThrow(NominatimGeocodingError);
+    });
+  });
+
+  describe('removing locations', () => {
+    let createdId: string | number;
+
+    beforeEach(async () => {
+      await manager.initialize();
+      const result = await manager.addByCoordinates({ lat: -6.2, lng: 106.8 });
+      createdId = result.id;
+    });
+
+    it('should remove single location by ID', () => {
+      const removed = manager.remove(createdId);
+      
+      expect(removed).toBe(true);
+      expect(manager.getCount()).toBe(0);
+      expect(() => manager.getById(createdId)).toThrow(LocationNotFoundError);
+    });
+
+    it('should return false when removing non-existent location', () => {
+      const removed = manager.remove('non-existent-id');
+      
+      expect(removed).toBe(false);
+      expect(manager.getCount()).toBe(1); // Still has the original location
+    });
+
+    it('should remove multiple locations at once', async () => {
+      await manager.addByCoordinates({ lat: -6.3, lng: 106.9 });
+      await manager.addByCoordinates({ lat: -6.4, lng: 107.0 });
+      
+      const locations = manager.getAll();
+      const ids = locations.slice(0, 2).map((loc) => loc.id);
+      
+      const removedCount = manager.removeMany(ids);
+      
+      expect(removedCount).toBe(2);
+      expect(manager.getCount()).toBe(1);
+    });
+
+    it('should clear all locations', () => {
+      manager.clear();
+      
+      expect(manager.getCount()).toBe(0);
+      expect(manager.getAll()).toEqual([]);
+    });
+  });
+
+  describe('getting locations', () => {
+    beforeEach(async () => {
+      await manager.initialize();
+      
+      await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Location 1');
+      await manager.addByCoordinates({ lat: -6.3, lng: 106.9 }, 'Location 2');
+      await manager.addByCoordinates({ lat: -6.4, lng: 107.0 }, 'Location 3');
+    });
+
+    it('should get all locations', () => {
+      const locations = manager.getAll();
+      
+      expect(locations).toHaveLength(3);
+      expect(locations.map((l) => l.areaName)).toContain('Location 1');
+    });
+
+    it('should get specific location by ID', () => {
+      const allLocations = manager.getAll();
+      const firstLocation = manager.getById(allLocations[0].id);
+      
+      expect(firstLocation.areaName).toBe('Location 1');
+    });
+
+    it('should throw LocationNotFoundError for non-existent ID', () => {
+      expect(() => manager.getById('non-existent')).toThrow(LocationNotFoundError);
+    });
+
+    it('should return random location', () => {
+      const random = manager.getRandom();
+      
+      expect(random).toBeDefined();
+      expect(manager.getAll()).toContain(random);
+    });
+
+    it('should return null when no locations exist', () => {
+      const tempManager = LocationManager.getInstance(new MockGeocoder());
+      
+      expect(tempManager.getRandom()).toBeNull();
+    });
+  });
+
+  describe('searching and filtering', () => {
+    beforeEach(async () => {
+      await manager.initialize();
+      
+      await manager.addByCoordinates(
+        { lat: -6.2, lng: 106.8 },
+        'Gelora Bung Karno Stadium'
+      );
+      await manager.addByCoordinates(
+        { lat: -6.3, lng: 106.9 },
+        'Simpang Lima Semarang'
+      );
+    });
+
+    it('should search by area name', () => {
+      const results = manager.search('Bung Karno');
+      
+      expect(results).toHaveLength(1);
+      expect(results[0].areaName).toBe('Gelora Bung Karno Stadium');
+    });
+
+    it('should search by street address', () => {
+      const results = manager.search('Jalan Test');
+      
+      expect(results.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should search by province', () => {
+      const results = manager.search('Jakarta');
+      
+      expect(results.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should filter by province', () => {
+      const results = manager.filterByProvince('DKI Jakarta');
+      
+      expect(results.some((r) => r.address.provinsi.includes('DKI Jakarta'))).toBe(true);
+    });
+
+    it('should filter by city/regency', () => {
+      const results = manager.filterByCity('Selatan');
+      
+      expect(results.some((r) => r.address.kabupaten?.includes('Selatan'))).toBe(true);
+    });
+  });
+
+  describe('export/import', () => {
+    beforeEach(async () => {
+      await manager.initialize();
+      
+      await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Export Test 1');
+      await manager.addByCoordinates({ lat: -6.3, lng: 106.9 }, 'Export Test 2');
+    });
+
+    it('should export all locations to JSON', () => {
+      const json = manager.exportToJson();
+      
+      const parsed = JSON.parse(json);
+      
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(2);
+      expect(parsed[0].areaName).toBe('Export Test 1');
+    });
+
+    it('should import locations from JSON', () => {
+      const tempManager = LocationManager.getInstance(new MockGeocoder());
+      
+      const importedCount = tempManager.importFromJson(manager.exportToJson());
+      
+      expect(importedCount).toBe(2);
+      expect(tempManager.getCount()).toBe(2);
+    });
+
+    it('should reject invalid JSON format', () => {
+      expect(() => 
+        manager.importFromJson('not valid json')
+      ).toThrow(StorageError);
+      
+      expect(() => 
+        manager.importFromJson('[{"invalid": "format"}]')
+      ).toThrow(StorageError);
+    });
+
+    it('should skip invalid location during import', () => {
+      const invalidJson = JSON.stringify([
+        { invalid: 'location without required fields' },
+        {
+          id: 'valid-1',
+          areaName: 'Valid Location',
+          coordinates: { lat: -6.2, lng: 106.8 },
+          address: {
+            street: 'Street',
+            kecamatan: 'District',
+            kabupaten: 'City',
+            provinsi: 'Province',
+            fullAddress: 'Full Address',
+          },
+        },
+      ]);
+      
+      const count = manager.importFromJson(invalidJson);
+      
+      expect(count).toBe(1); // Only valid location is imported
+    });
+  });
+
+  describe('update functionality', () => {
+    it('should update location with new data', async () => {
+      await manager.initialize();
+      
+      const location = await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Original Name');
+      
+      const updated = manager.update(location.id, { areaName: 'Updated Name' });
+      
+      expect(updated.areaName).toBe('Updated Name');
+      expect(updated.id).toBe(location.id);
+      expect(manager.getById(location.id).areaName).toBe('Updated Name');
+    });
+
+    it('should update coordinates with validation', async () => {
+      await manager.initialize();
+      
+      const location = await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Test');
+      
+      const updated = manager.update(location.id, {
+        coordinates: { lat: -6.5, lng: 107.0 },
+      });
+      
+      expect(updated.coordinates.lat).toBe(-6.5);
+      expect(updated.coordinates.lng).toBe(107.0);
+    });
+
+    it('should reject invalid coordinate updates', async () => {
+      await manager.initialize();
+      
+      const location = await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Test');
+      
+      expect(() =>
+        manager.update(location.id, {
+          coordinates: { lat: 100, lng: 106.8 } as Coordinates,
+        })
+      ).toThrow(LocationError);
+    });
+  });
+
+  describe('utility methods', () => {
+    beforeEach(async () => {
+      await manager.initialize();
+      
+      await manager.addByCoordinates({ lat: -6.2, lng: 106.8 }, 'Location 1');
+      await manager.addByCoordinates({ lat: -6.3, lng: 106.9 }, 'Location 2');
+    });
+
+    it('should return correct count', () => {
+      expect(manager.getCount()).toBe(2);
+    });
+
+    it('should check if location exists', () => {
+      const locations = manager.getAll();
+      
+      expect(manager.hasLocation(locations[0].id)).toBe(true);
+      expect(manager.hasLocation('non-existent')).toBe(false);
+    });
+  });
+});
+
+describe('getLocationManager singleton', () => {
+  let originalLocalStorage: typeof global.localStorage;
+
+  beforeAll(() => {
+    originalLocalStorage = global.localStorage;
+  });
+
+  afterAll(() => {
+    global.localStorage = originalLocalStorage;
+  });
+
+  beforeEach(() => {
+    global.localStorage = {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    } as unknown as Storage;
+  });
+
+  it('should return same instance on multiple calls', () => {
+    const mgr1 = getLocationManager();
+    const mgr2 = getLocationManager();
+    
+    expect(mgr1).toBe(mgr2);
+  });
+});
+
+describe('error classes', () => {
+  it('should create LocationError with correct message', () => {
+    const error = new LocationError('Test error');
+    
+    expect(error.message).toBe('Test error');
+    expect(error.name).toBe('LocationError');
+    expect(error).toBeInstanceOf(LocationError);
+    expect(error).toBeInstanceOf(Error);
+  });
+
+  it('should create LocationNotFoundError with location ID', () => {
+    const error = new LocationNotFoundError('test-id-123');
+    
+    expect(error.message).toContain('test-id-123');
+    expect(error.name).toBe('LocationNotFoundError');
+  });
+
+  it('should create GeocodingError with provider info', () => {
+    const error = new NominatimGeocodingError('Geocoding failed', 'Nominatim');
+    
+    expect(error.message).toBe('Geocoding failed');
+    expect(error.provider).toBe('Nominatim');
+    expect(error.name).toBe('GeocodingError');
+  });
+
+  it('should create StorageError correctly', () => {
+    const error = new StorageError('Storage unavailable');
+    
+    expect(error.message).toBe('Storage unavailable');
+    expect(error.name).toBe('StorageError');
+  });
+});
