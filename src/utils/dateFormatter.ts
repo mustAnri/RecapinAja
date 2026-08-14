@@ -72,10 +72,12 @@ export function getFormat(id: string): TimestampFormat {
 
 /**
  * Parse a date cell. Accepts:
- * - `DD/MM/YYYY`, `D/M/YYYY`, `DD-MM-YYYY` (day first — the spreadsheet
- *   convention used in the PRD examples, e.g. 20/05/2022),
- * - `YYYY-MM-DD` / `YYYY/MM/DD` (ISO).
- * Returns null for anything ambiguous or invalid.
+ * - `DD/MM/YYYY`, `D/M/YYYY`, `DD-MM-YYYY`, `DD.MM.YYYY` (day first — the
+ *   spreadsheet convention used in the PRD examples, e.g. 20/05/2022; the
+ *   dot form matches Indonesian/European notation, e.g. 20.05.2022),
+ * - `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYY.MM.DD` (ISO).
+ * The separator must be consistent within one cell. Returns null for
+ * anything ambiguous or invalid.
  */
 export function parseDateCell(raw: string): DateParts | null {
   const text = raw.trim();
@@ -85,17 +87,17 @@ export function parseDateCell(raw: string): DateParts | null {
   let month: number;
   let year: number;
 
-  const iso = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  const iso = text.match(/^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})$/);
   if (iso) {
     year = Number(iso[1]);
-    month = Number(iso[2]);
-    day = Number(iso[3]);
+    month = Number(iso[3]);
+    day = Number(iso[4]);
   } else {
-    const dmy = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    const dmy = text.match(/^(\d{1,2})([-/.])(\d{1,2})\2(\d{4})$/);
     if (!dmy) return null;
     day = Number(dmy[1]);
-    month = Number(dmy[2]);
-    year = Number(dmy[3]);
+    month = Number(dmy[3]);
+    year = Number(dmy[4]);
   }
 
   if (month < 1 || month > 12) return null;
@@ -104,11 +106,13 @@ export function parseDateCell(raw: string): DateParts | null {
 }
 
 /**
- * Parse a time cell. Accepts `HH:mm`, `H:mm` and `HH:mm:ss` (24-hour clock).
+ * Parse a time cell. Accepts `HH:mm`, `H:mm` and `HH:mm:ss` (24-hour
+ * clock), with `:` or `.` as the separator — Indonesian sheets commonly
+ * write times with dots, e.g. "21.22" means 21:22.
  * Returns null when the value is not a valid time of day.
  */
 export function parseTimeCell(raw: string): { hour: number; minute: number } | null {
-  const match = raw.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  const match = raw.trim().match(/^(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?$/);
   if (!match) return null;
   const hour = Number(match[1]);
   const minute = Number(match[2]);

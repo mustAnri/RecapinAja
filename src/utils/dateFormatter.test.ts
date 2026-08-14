@@ -47,6 +47,19 @@ describe('parseDateCell', () => {
     expect(parseDateCell('2022')).toBeNull();
     expect(parseDateCell('20/05/22')).toBeNull(); // two-digit year is ambiguous
   });
+
+  it('parses dotted DD.MM.YYYY', () => {
+    expect(parseDateCell('20.05.2022')).toEqual({ year: 2022, month: 5, day: 20 });
+  });
+
+  it('parses dotted ISO YYYY.MM.DD', () => {
+    expect(parseDateCell('2026.02.28')).toEqual({ year: 2026, month: 2, day: 28 });
+  });
+
+  it('rejects mixed separators in one date', () => {
+    expect(parseDateCell('20/05.2022')).toBeNull();
+    expect(parseDateCell('20.05/2022')).toBeNull();
+  });
 });
 
 describe('parseTimeCell', () => {
@@ -67,6 +80,20 @@ describe('parseTimeCell', () => {
     expect(parseTimeCell('12:60')).toBeNull();
     expect(parseTimeCell('1260')).toBeNull();
     expect(parseTimeCell('')).toBeNull();
+  });
+
+  it('parses dotted HH.mm (Indonesian notation)', () => {
+    expect(parseTimeCell('21.22')).toEqual({ hour: 21, minute: 22 });
+  });
+
+  it('parses dotted H.mm and HH.mm.ss', () => {
+    expect(parseTimeCell('8.15')).toEqual({ hour: 8, minute: 15 });
+    expect(parseTimeCell('08.15.30')).toEqual({ hour: 8, minute: 15 });
+  });
+
+  it('rejects invalid dotted times of day', () => {
+    expect(parseTimeCell('24.00')).toBeNull();
+    expect(parseTimeCell('12.60')).toBeNull();
   });
 });
 

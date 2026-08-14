@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { ImportedSheet, RowSelection } from '../../types/spreadsheet';
+import type { ImportedSheet, RowSelection, SpreadsheetRow } from '../../types/spreadsheet';
 import {
+  applyRowOverrides,
+  buildTimeListRows,
   describeUnselectedRoles,
   extractTimestampRows,
   guessDateColumn,
@@ -279,5 +281,58 @@ describe('rowHeaders', () => {
       ],
     };
     expect(rowHeaders(data, 2)).toEqual(['No', 'Jam']);
+  });
+});
+
+describe('applyRowOverrides (§edit manual per baris)', () => {
+  const rows: SpreadsheetRow[] = [
+    { date: '20/05/2022', dateError: null, time: '99:99', sheetRowNumber: 2, error: 'Invalid time: "99:99"' },
+    { date: '20/05/2022', dateError: null, time: '14:09', sheetRowNumber: 3, error: null },
+  ];
+
+  it('replaces a time and re-validates it', () => {
+    const patched = applyRowOverrides(rows, { 2: { time: '21:22' } });
+    expect(patched[0].time).toBe('21:22');
+    expect(patched[0].error).toBeNull();
+  });
+
+  it('accepts a dotted-time override (21.22)', () => {
+    const patched = applyRowOverrides(rows, { 2: { time: '21.22' } });
+    expect(patched[0].error).toBeNull();
+  });
+
+  it('re-validates an edited date', () => {
+    const patched = applyRowOverrides(rows, { 3: { date: 'bukan-tanggal' } });
+    expect(patched[1].date).toBe('bukan-tanggal');
+    expect(patched[1].dateError).toMatch(/invalid date/i);
+  });
+
+  it('leaves rows without an override untouched', () => {
+    expect(applyRowOverrides(rows, {})).toEqual(rows);
+    expect(applyRowOverrides(rows, { 9: { time: '10:00' } })).toEqual(rows);
+  });
+});
+
+describe('buildTimeListRows (Mode Cepat)', () => {
+  it('builds one row per non-empty line sharing the date', () => {
+    const rows = buildTimeListRows('20/05/2022', ['08:15', '', '09.30']);
+    expect(rows.map((r) => r.time)).toEqual(['08:15', '09.30']);
+    expect(rows.every((r) => r.date === '20/05/2022' && r.dateError === null)).toBe(true);
+  });
+
+  it('numbers rows by line position, skipping blanks without shifting', () => {
+    const rows = buildTimeListRows('20/05/2022', ['', '10:00']);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sheetRowNumber).toBe(2);
+  });
+
+  it('flags invalid times but keeps the row', () => {
+    const rows = buildTimeListRows('20/05/2022', ['99:99']);
+    expect(rows[0].error).toMatch(/invalid time/i);
+  });
+
+  it('flags an invalid date on every row', () => {
+    const rows = buildTimeListRows('salah', ['10:00']);
+    expect(rows[0].dateError).toMatch(/invalid date/i);
   });
 });

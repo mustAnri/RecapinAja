@@ -26,10 +26,12 @@ import {
 } from './services/filesystem';
 import { loadSpreadsheet } from './services/spreadsheet';
 import {
+  applyRowOverrides,
   extractTimestampRows,
   guessDateColumn,
   guessTimeColumn,
   rowHeaders,
+  type RowOverrides,
 } from './services/spreadsheet/parse';
 import { buildSequentialMapping } from './services/mapping';
 import { processBatch } from './services/batchProcessor';
@@ -44,6 +46,7 @@ import { TimestampInput } from './components/TimestampInput/TimestampInput';
 import { MappingPreview } from './components/MappingPreview/MappingPreview';
 import { ProcessingProgress } from './components/ProcessingProgress/ProcessingProgress';
 import { ResultPanel } from './components/ResultPanel/ResultPanel';
+import { QuickMode } from './components/QuickMode/QuickMode';
 
 const STEPS = [
   {
@@ -147,6 +150,8 @@ function PageHeading({
 
 export default function App() {
   const [step, setStep] = useState<StepIndex>(0);
+  /** Workflow mode: the full seven steps, or the dedicated quick tabs. */
+  const [mode, setMode] = useState<'lengkap' | 'cepat'>('lengkap');
 
   // Step 1 — spreadsheet (the time list)
   const [sheetUrl, setSheetUrl] = useState('');
@@ -169,6 +174,10 @@ export default function App() {
   // Step 5 — column selection + manual time (used when timeSource is "manual")
   const [selection, setSelection] = useState<RowSelection>(EMPTY_SELECTION);
   const [timeInput, setTimeInput] = useState('');
+
+
+  /** Per-row manual edits made in the mapping preview (replace/edit cells). */
+  const [overrides, setOverrides] = useState<RowOverrides>({});
 
   // Steps 6/7 — batch run
   const [progress, setProgress] = useState<BatchProgress | null>(null);
@@ -197,17 +206,24 @@ export default function App() {
     // A sheet source needs a loaded sheet; a fully manual run works without one.
     if (!sheet && !fullyManual) return null;
     const source = sheet ?? NO_SHEET;
-    return extractTimestampRows(
+    const base = extractTimestampRows(
       source,
       selection,
       { dateCell: dateInput, timeCell: timeInput },
       photos.length,
     );
-  }, [sheet, selection, dateInput, timeInput, photos.length, fullyManual]);
+    return { ...base, rows: applyRowOverrides(base.rows, overrides) };
+  }, [sheet, selection, dateInput, timeInput, photos.length, fullyManual, overrides]);
 
   const mapping = useMemo(
     () => (extracted ? buildSequentialMapping(photos, extracted.rows) : null),
     [photos, extracted],
+  );
+
+  /** Row numbers the user has manually edited in the preview. */
+  const editedRowNumbers = useMemo(
+    () => new Set(Object.keys(overrides).map(Number)),
+    [overrides],
   );
 
   /* ------------------------- step 1: spreadsheet ------------------------- */
@@ -216,6 +232,7 @@ export default function App() {
     setSheet(loaded);
     setGidSelection(loaded.gid);
     setOutput(null);
+    setOverrides({}); // new data — old manual edits no longer apply
     const headers = rowHeaders(loaded, 1);
     setSelection((prev) => ({
       ...prev,
@@ -251,6 +268,13 @@ export default function App() {
     }
   };
 
+  /** Manual per-row edit from the mapping preview (replace/fix a cell). */
+  const handleEditCell = (sheetRowNumber: number, field: 'date' | 'time', value: string) => {
+    setOverrides((prev) => ({
+      ...prev,
+      [sheetRowNumber]: { ...prev[sheetRowNumber], [field]: value },
+    }));
+  };
   /* --------------------------- step 2: photos ---------------------------- */
 
   const handlePickFolder = async () => {
@@ -332,6 +356,7 @@ export default function App() {
     setTemplate(null);
     setDateInput('');
     setTimeInput('');
+    setOverrides({});
     setProgress(null);
     setOutput(null);
     setBatchError(null);
@@ -397,6 +422,63 @@ export default function App() {
     selection.timeColumn !== null
       ? sheetHeaders[selection.timeColumn] || `Column ${selection.timeColumn + 1}`
       : null;
+
+  const modeSwitch = (
+    <div
+      className="inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1"
+      role="tablist"
+      aria-label="Mode workflow"
+    >
+      {(
+        [
+          { id: 'lengkap', label: 'Mode Lengkap' },
+          { id: 'cepat', label: 'Mode Cepat' },
+        ] as const
+      ).map((option) => (
+        <button
+          key={option.id}
+          type="button"
+          role="tab"
+          aria-selected={mode === option.id}
+          onClick={() => setMode(option.id)}
+          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
+            mode === option.id
+              ? 'bg-white text-slate-900 shadow-sm'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+
+  /* Mode Cepat — dedicated simple tabs, no spreadsheet needed. */
+  if (mode === 'cepat') {
+    return (
+      <div className="app-bg min-h-screen">
+        <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/80 backdrop-blur-md">
+          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+            <Brand compact />
+            {modeSwitch}
+          </div>
+        </header>
+        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6">
+          <div className="space-y-6">
+            <PageHeading
+              icon={Icons.sparkles}
+              title="Mode Cepat"
+              description="Alur ringkas tanpa spreadsheet: atur jam → upload foto → proses (batch/manual) → save."
+            />
+            <QuickMode />
+          </div>
+        </main>
+        <footer className="mx-auto w-full max-w-5xl px-4 pb-8 text-center text-xs text-slate-400 sm:px-6">
+          Semua pemrosesan berjalan lokal di browser Anda — foto asli tidak pernah diubah.
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <div className="app-bg min-h-screen">
@@ -488,6 +570,7 @@ export default function App() {
               </span>
             </div>
             <div className="flex items-center gap-3">
+              {modeSwitch}
               <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold tabular-nums text-slate-500 sm:block">
                 {progressPercent}% selesai
               </span>
@@ -728,7 +811,13 @@ export default function App() {
                           list timestamp. Periksa pasangan di bawah sebelum menjalankan proses.
                         </p>
                         <div className="mt-5">
-                          <MappingPreview mapping={mapping} formatId={DEFAULT_FORMAT_ID} />
+                          <MappingPreview
+                            mapping={mapping}
+                            formatId={DEFAULT_FORMAT_ID}
+                            onEditCell={handleEditCell}
+                            editedRows={editedRowNumbers}
+                            disabled={!!progress}
+                          />
                         </div>
                       </div>
                     )}

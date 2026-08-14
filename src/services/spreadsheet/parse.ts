@@ -89,6 +89,59 @@ export interface ManualTimestamps {
   timeCell: string;
 }
 
+/**
+ * Per-row manual overrides keyed by `sheetRowNumber`. Lets the user fix a
+ * wrong or invalid cell directly in the mapping preview without touching
+ * the spreadsheet. An empty-string field means "not overridden".
+ */
+export type RowOverrides = Record<number, { date?: string; time?: string }>;
+
+/**
+ * Apply manual overrides onto extracted rows. Each override replaces the
+ * cell text and re-validates it, so an edited value is judged exactly like
+ * a spreadsheet value — never silently coerced. Rows without an override
+ * pass through unchanged.
+ */
+export function applyRowOverrides(rows: SpreadsheetRow[], overrides: RowOverrides): SpreadsheetRow[] {
+  return rows.map((row) => {
+    const patch = overrides[row.sheetRowNumber];
+    if (!patch) return row;
+    const date = patch.date !== undefined ? patch.date : row.date;
+    const time = patch.time !== undefined ? patch.time : row.time;
+    return {
+      ...row,
+      date,
+      dateError: dateErrorFor(date),
+      time,
+      error: timeErrorFor(time),
+    };
+  });
+}
+
+/**
+ * Build timestamp rows from a typed list of times (Mode Cepat): one time
+ * per line, all sharing one date. Blank lines are skipped without shifting
+ * numbering gaps — line N maps to row number N. Invalid times keep their
+ * error so the paired photo fails visibly, never guessed.
+ */
+export function buildTimeListRows(dateCell: string, timeLines: string[]): SpreadsheetRow[] {
+  const date = dateCell.trim();
+  const dateError = dateErrorFor(date);
+  const rows: SpreadsheetRow[] = [];
+  timeLines.forEach((line, index) => {
+    const time = line.trim();
+    if (!time) return;
+    rows.push({
+      date,
+      dateError,
+      time,
+      sheetRowNumber: index + 1,
+      error: timeErrorFor(time),
+    });
+  });
+  return rows;
+}
+
 function dateErrorFor(cell: string): string | null {
   if (!cell) return 'Date is empty';
   return parseDateCell(cell) ? null : `Invalid date: "${cell}"`;
