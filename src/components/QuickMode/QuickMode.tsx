@@ -8,7 +8,7 @@
  * one per line, paired with photos in filename order (batch).
  */
 import { useMemo, useRef, useState } from 'react';
-import type { BatchOutput, BatchProgress, CropTemplate } from '../../types/processing';
+import type { BatchOutput, BatchProgress, CropTemplate, TimestampPosition } from '../../types/processing';
 import {
   FilesystemError,
   PickerCancelledError,
@@ -37,6 +37,7 @@ import {
   Guide,
   Icons,
   Tabs,
+  Tilt3D,
   inputClasses,
 } from '../ui';
 import { FolderSelector } from '../FolderSelector/FolderSelector';
@@ -65,6 +66,10 @@ export function QuickMode() {
   const [dateInput, setDateInput] = useState('');
   const [timeInput, setTimeInput] = useState('');
   const [timeListText, setTimeListText] = useState('');
+  /** Single fixed display format — no user-facing format choice. */
+  const formatId = DEFAULT_FORMAT_ID;
+  /** Where the timestamp text is anchored on the final (cropped) photo. */
+  const [position, setPosition] = useState<TimestampPosition>('bottom-right');
 
   const [folder, setFolder] = useState<FolderSelection | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -133,12 +138,11 @@ export function QuickMode() {
   const canProcess =
     photos.length > 0 &&
     mapping.entries.length > 0 &&
-    !!template &&
     jamReady &&
     !progress;
 
   const handleProcess = async () => {
-    if (!canProcess || !template) return;
+    if (!canProcess) return;
     setBatchError(null);
 
     let outputFolder;
@@ -158,8 +162,8 @@ export function QuickMode() {
     try {
       const result = await processBatch(mapping.entries, {
         crop: template,
-        formatId: DEFAULT_FORMAT_ID,
-        position: 'bottom-right',
+        formatId,
+        position,
         outputFolder,
         extraPhotos: mapping.extraPhotos,
         onProgress: (p) => {
@@ -187,6 +191,7 @@ export function QuickMode() {
     setDateInput('');
     setTimeInput('');
     setTimeListText('');
+    setPosition('bottom-right');
     setFolder(null);
     setTemplate(null);
     setProgress(null);
@@ -231,12 +236,13 @@ export function QuickMode() {
           </Badge>
           <Badge tone={template ? 'emerald' : 'slate'}>
             <Icons.settings className="h-3 w-3" />
-            Crop {template ? 'siap' : 'belum'}
+            {template ? 'Crop 1:1 aktif' : 'Tanpa crop'}
           </Badge>
         </div>
       </div>
 
       {/* ------------------------------ 1 · Atur Jam ------------------------- */}
+      <div key={tab} className="anim-step space-y-6">
       {tab === 'jam' && (
         <>
           <Guide
@@ -385,7 +391,7 @@ export function QuickMode() {
         <>
           <Guide
             steps={[
-              'Konfirmasi crop 1:1 sekali — dipakai ke semua foto.',
+              'Pilih posisi timestamp — crop 1:1 opsional (aktifkan toggle bila perlu).',
               'Periksa pasangan foto ↔ timestamp di tabel preview.',
               'Klik proses lalu pilih folder tujuan; hasil disimpan di subfolder “Processed …”.',
               'Foto tanpa pasangan jam disalin apa adanya ke subfolder “Tanpa jam”.',
@@ -397,6 +403,8 @@ export function QuickMode() {
               photos={photos}
               template={template}
               onConfirm={setTemplate}
+              position={position}
+              onPositionChange={setPosition}
               disabled={!!progress}
             />
           ) : (
@@ -418,7 +426,7 @@ export function QuickMode() {
               title="Preview pasangan foto ↔ timestamp"
               subtitle="Periksa sebelum proses — jam yang invalid akan gagal, tidak pernah ditebak"
             >
-              <MappingPreview mapping={mapping} formatId={DEFAULT_FORMAT_ID} disabled={!!progress} />
+              <MappingPreview mapping={mapping} formatId={formatId} disabled={!!progress} />
             </Card>
           )}
 
@@ -467,21 +475,24 @@ export function QuickMode() {
               </div>
             </>
           ) : (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
-              <Icons.file className="mx-auto h-8 w-8 text-slate-300" />
-              <p className="mt-3 text-sm font-semibold text-slate-700">Belum ada hasil</p>
-              <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
-                Jalankan proses dulu di tab “3 · Proses”. Setelah selesai, ringkasan hasil tampil
-                di sini.
-              </p>
-              <Button variant="secondary" className="mt-4" onClick={() => setTab('proses')}>
-                <Icons.refresh className="h-4 w-4" />
-                Ke Proses
-              </Button>
-            </div>
+            <Tilt3D maxTilt={3} glare={false}>
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
+                <Icons.file className="anim-float mx-auto h-8 w-8 text-slate-300" />
+                <p className="mt-3 text-sm font-semibold text-slate-700">Belum ada hasil</p>
+                <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
+                  Jalankan proses dulu di tab “3 · Proses”. Setelah selesai, ringkasan hasil tampil
+                  di sini.
+                </p>
+                <Button variant="secondary" className="mt-4" onClick={() => setTab('proses')}>
+                  <Icons.refresh className="h-4 w-4" />
+                  Ke Proses
+                </Button>
+              </div>
+            </Tilt3D>
           )}
         </>
       )}
+      </div>
     </div>
   );
 }

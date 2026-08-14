@@ -31,8 +31,8 @@ import type {
 const MAX_OUTPUT_SIDE_PX = 4096;
 
 export interface BatchOptions {
-  /** Confirmed crop template (§19), applied to every photo. */
-  crop: CropTemplate;
+  /** Confirmed crop template (§19), or null to keep each photo's full frame. */
+  crop: CropTemplate | null;
 
   /** Timestamp format id from the dateFormatter registry. */
   formatId: string;

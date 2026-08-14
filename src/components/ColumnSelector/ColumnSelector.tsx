@@ -58,6 +58,7 @@ export function ColumnSelector({
   );
 
   const manual = config.timeSource === 'manual';
+  const byName = config.matchMode === 'byName';
   const headers = sheet ? rowHeaders(sheet, config.headerRow) : [];
   const complete = isSelectionComplete(config);
   const unselected = describeUnselectedRoles(config);
@@ -213,6 +214,55 @@ export function ColumnSelector({
         </div>
       </div>
 
+      <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-slate-800">Cara memasangkan foto ↔ baris</p>
+            <p className="mt-0.5 text-xs text-slate-500">
+              {byName
+                ? 'Nama file foto dicocokkan dengan isi kolom nama — huruf besar/kecil, spasi ekstra, dan tanda baca diabaikan.'
+                : 'Foto diurutkan berdasarkan nama file lalu dipasangkan berurutan dengan baris data (foto ke-N ↔ baris ke-N).'}
+            </p>
+          </div>
+          <Tabs
+            tabs={[
+              { id: 'sequential', label: 'Berurutan' },
+              { id: 'byName', label: 'Berdasarkan nama file' },
+            ]}
+            active={config.matchMode}
+            onChange={(id) => onConfig({ ...config, matchMode: id })}
+          />
+        </div>
+
+        <div className="mt-4">
+          {byName ? (
+            sheet ? (
+              <Field
+                label="Kolom nama"
+                hint="Isi kolom ini dicocokkan dengan nama file foto (tanpa ekstensi), mis. “Erdi mayardi” ↔ ERDI MAYADI.jpg"
+              >
+                <select
+                  value={config.nameColumn ?? ''}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    onConfig({ ...config, nameColumn: value === '' ? null : Number(value) });
+                  }}
+                  className={inputClasses}
+                >
+                  <option value="">— pilih kolom —</option>
+                  {columnOptions}
+                </select>
+              </Field>
+            ) : (
+              <InfoBanner message="Spreadsheet belum dimuat — muat dulu di langkah 1 untuk memilih kolom nama." />
+            )
+          ) : (
+            <InfoBanner message="Mode berurutan cocok bila jumlah dan urutan foto sama persis dengan baris spreadsheet. Jika nama file mengikuti nama customer, pakai mode “Berdasarkan nama file”." />
+          )}
+        </div>
+      </div>
+
       {!complete && (
         <div className="mt-4">
           <ErrorBanner
@@ -239,6 +289,7 @@ export function ColumnSelector({
                   {headers.map((_, columnIndex) => {
                     const isTime = !manual && columnIndex === config.timeColumn;
                     const isDate = columnIndex === config.dateColumn;
+                    const isName = byName && columnIndex === config.nameColumn;
                     return (
                       <td
                         key={columnIndex}
@@ -247,7 +298,9 @@ export function ColumnSelector({
                             ? 'bg-indigo-50 font-medium text-indigo-900'
                             : isDate
                               ? 'bg-violet-50 font-medium text-violet-900'
-                              : ''
+                              : isName
+                                ? 'bg-emerald-50 font-medium text-emerald-900'
+                                : ''
                         }`}
                       >
                         {row[columnIndex] ?? ''}
@@ -274,7 +327,13 @@ export function ColumnSelector({
             </WarningBanner>
           )}
 
-          <InfoBanner message="Photos are paired with these rows in order: photo 1 → first data row, photo 2 → second, and so on. Verify the order before processing." />
+          <InfoBanner
+            message={
+              byName
+                ? 'Pasangan ditentukan oleh kecocokan nama file ↔ kolom nama (bukan urutan). Foto yang tidak cocok tidak diberi timestamp sembarangan.'
+                : 'Photos are paired with these rows in order: photo 1 → first data row, photo 2 → second, and so on. Verify the order before processing.'
+            }
+          />
         </div>
       )}
     </Card>

@@ -55,7 +55,7 @@ export interface FolderSelection {
   handle: FSDirectoryHandle;
   /** Folder name for display. */
   name: string;
-  /** Supported photos found in the folder (top level). */
+  /** Supported photos found in the folder and its subfolders. */
   photos: File[];
   /** Non-photo files skipped during the scan. */
   skippedCount: number;
@@ -63,9 +63,14 @@ export interface FolderSelection {
   rejected: { filename: string; reason: string }[];
 }
 
+/** How many folder levels below the picked root are scanned. */
+const MAX_SCAN_DEPTH = 3;
+
 /**
  * Step 1 (§13): let the user pick the input folder and scan it for
- * supported image files. Only the top level of the folder is scanned.
+ * supported image files. Subfolders are scanned too (up to
+ * `MAX_SCAN_DEPTH` levels), since photo drops commonly land one level
+ * down — the deterministic filename sort keeps ordering stable anyway.
  */
 export async function pickInputFolder(): Promise<FolderSelection> {
   const handle = await pickDirectory('read');
@@ -74,25 +79,33 @@ export async function pickInputFolder(): Promise<FolderSelection> {
   const rejected: { filename: string; reason: string }[] = [];
   let skippedCount = 0;
 
-  for await (const entry of handle.values()) {
-    if (!('getFile' in entry)) continue; // a sub-directory
-    const fileHandle = entry as FSFileHandle & { getFile(): Promise<File> };
-    let file: File;
-    try {
-      file = await fileHandle.getFile();
-    } catch {
-      skippedCount += 1;
-      continue;
-    }
-    if (!isSupportedPhoto(file.name, file.type)) {
-      skippedCount += 1;
-      continue;
-    }
-    const problem = validatePhotoEntry(file.name, file.size, file.type);
-    if (problem) {
-      rejected.push({ filename: file.name, reason: problem });
-    } else {
-      photos.push(file);
+  const queue: { dir: FSDirectoryHandle; depth: number }[] = [{ dir: handle, depth: 0 }];
+  while (queue.length > 0) {
+    const { dir, depth } = queue.shift() as { dir: FSDirectoryHandle; depth: number };
+    for await (const entry of dir.values()) {
+      if (!('getFile' in entry)) {
+        // A sub-directory — recurse while within the depth cap.
+        if (depth < MAX_SCAN_DEPTH) queue.push({ dir: entry as FSDirectoryHandle, depth: depth + 1 });
+        continue;
+      }
+      const fileHandle = entry as FSFileHandle & { getFile(): Promise<File> };
+      let file: File;
+      try {
+        file = await fileHandle.getFile();
+      } catch {
+        skippedCount += 1;
+        continue;
+      }
+      if (!isSupportedPhoto(file.name, file.type)) {
+        skippedCount += 1;
+        continue;
+      }
+      const problem = validatePhotoEntry(file.name, file.size, file.type);
+      if (problem) {
+        rejected.push({ filename: file.name, reason: problem });
+      } else {
+        photos.push(file);
+      }
     }
   }
 

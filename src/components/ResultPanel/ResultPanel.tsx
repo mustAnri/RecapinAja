@@ -17,18 +17,19 @@ export function ResultPanel({ output }: ResultPanelProps) {
 
   return (
     <Card
-      title="Batch Processing Complete"
-      subtitle="Original photos were left untouched; processed copies were saved to the output folder"
+      className="anim-pop"
+      title="Batch selesai diproses"
+      subtitle="Foto asli tidak diubah; salinan hasil disimpan ke folder output"
       actions={
         summary.failed === 0 ? (
           <Badge tone="emerald">
             <Icons.check className="h-3.5 w-3.5" />
-            All successful
+            Semua berhasil
           </Badge>
         ) : (
           <Badge tone="red">
             <Icons.alert className="h-3.5 w-3.5" />
-            {summary.failed} failed
+            {summary.failed} gagal
           </Badge>
         )
       }
@@ -36,32 +37,32 @@ export function ResultPanel({ output }: ResultPanelProps) {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatCard label="Total" value={summary.total} tone="slate" hint="semua foto" />
         <StatCard
-          label="Successful"
+          label="Berhasil"
           value={summary.successful}
           tone={summary.successful > 0 ? 'emerald' : 'slate'}
-          hint="saved with timestamp"
+          hint="tersimpan dengan timestamp"
         />
         <StatCard
-          label="Copied as-is"
+          label="Disalin apa adanya"
           value={summary.copied}
           tone={summary.copied > 0 ? 'amber' : 'slate'}
           hint="tanpa jam — di subfolder “Tanpa jam”"
         />
         <StatCard
-          label="Failed"
+          label="Gagal"
           value={summary.failed}
           tone={summary.failed > 0 ? 'red' : 'slate'}
-          hint="see reasons below"
+          hint="lihat alasan di bawah"
         />
-        <StatCard label="Output folder" value={outputFolderName} tone="indigo" hint="processed copies" />
+        <StatCard label="Folder output" value={outputFolderName} tone="indigo" hint="salinan hasil proses" />
       </div>
 
       {failures.length > 0 && (
         <div className="mt-5 space-y-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-red-600">
-            Failed photos ({failures.length})
+            Foto gagal ({failures.length})
           </p>
-          <TableShell headers={['Photo', 'Reason']} maxHeight="max-h-64">
+          <TableShell headers={['Foto', 'Alasan']} maxHeight="max-h-64">
             {failures.map((result, index) => (
               <tr key={`${result.filename}-${index}`} className="bg-white hover:bg-red-50/40">
                 <td className="px-4 py-2 font-medium text-slate-800">
@@ -77,9 +78,9 @@ export function ResultPanel({ output }: ResultPanelProps) {
       {successes.length > 0 && (
         <div className="mt-5 space-y-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Saved files ({successes.length})
+            File tersimpan ({successes.length})
           </p>
-          <TableShell headers={['Original', 'Saved as']} maxHeight="max-h-64">
+          <TableShell headers={['Asli', 'Tersimpan sebagai']} maxHeight="max-h-64">
             {successes.map((result, index) => (
               <tr key={`${result.filename}-${index}`} className="bg-white hover:bg-slate-50">
                 <td className="px-4 py-2 text-slate-700">
@@ -99,7 +100,7 @@ export function ResultPanel({ output }: ResultPanelProps) {
           <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
             Disalin apa adanya tanpa timestamp ({copied.length})
           </p>
-          <TableShell headers={['Photo', 'Saved as']} maxHeight="max-h-64">
+          <TableShell headers={['Foto', 'Tersimpan sebagai']} maxHeight="max-h-64">
             {copied.map((result, index) => (
               <tr key={`${result.filename}-${index}`} className="bg-white hover:bg-amber-50/40">
                 <td className="px-4 py-2 text-slate-700">

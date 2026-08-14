@@ -12,10 +12,13 @@ import { parseDateCell, parseTimeCell } from '../../utils/dateFormatter';
 import type { ImportedSheet, RowSelection, SpreadsheetRow } from '../../types/spreadsheet';
 
 /** Lower-cased header hints used to pre-select the time column default. */
-const TIME_HINTS = ['jam', 'waktu', 'time'];
+const TIME_HINTS = ['jam', 'waktu', 'start', 'time'];
 
 /** Lower-cased header hints used to pre-select the date column default. */
 const DATE_HINTS = ['tanggal', 'tgl', 'date'];
+
+/** Lower-cased header hints used to pre-select the name column default. */
+const NAME_HINTS = ['nama customer', 'customer name', 'pelanggan', 'customer', 'nama', 'name'];
 
 /**
  * Parse a raw cell matrix (row 1 = header by default) into an ImportedSheet.
@@ -35,13 +38,15 @@ export function rowHeaders(sheet: ImportedSheet, headerRow: number): string[] {
 
 function firstHeaderMatch(headers: string[], hints: string[]): number | null {
   const lower = headers.map((h) => h.toLowerCase());
-  // exact hint match first, then substring match
+  // exact hint match first, then whole-word match (so "Timestamp" never
+  // matches the "time" hint, but "Start Test Drive" matches "start")
   for (const hint of hints) {
     const exact = lower.findIndex((h) => h === hint);
     if (exact >= 0) return exact;
   }
   for (const hint of hints) {
-    const partial = lower.findIndex((h) => h !== '' && h.includes(hint));
+    const word = new RegExp(`(^|[^a-z0-9])${hint}($|[^a-z0-9])`);
+    const partial = lower.findIndex((h) => h !== '' && word.test(h));
     if (partial >= 0) return partial;
   }
   return null;
@@ -57,14 +62,21 @@ export function guessDateColumn(headers: string[]): number | null {
   return firstHeaderMatch(headers, DATE_HINTS);
 }
 
+/** Pre-select the most likely name column (user can override). */
+export function guessNameColumn(headers: string[]): number | null {
+  return firstHeaderMatch(headers, NAME_HINTS);
+}
+
 /**
  * True when the selection can produce timestamp values. Each source is
  * checked independently: manual needs nothing, sheet needs its column.
+ * Name matching additionally needs the column it matches filenames against.
  */
 export function isSelectionComplete(selection: RowSelection): boolean {
   const dateOk = selection.dateSource === 'manual' || selection.dateColumn !== null;
   const timeOk = selection.timeSource === 'manual' || selection.timeColumn !== null;
-  return dateOk && timeOk;
+  const nameOk = selection.matchMode === 'sequential' || selection.nameColumn !== null;
+  return dateOk && timeOk && nameOk;
 }
 
 /** Human-readable list of roles that still need a column (sheet sources). */
@@ -72,6 +84,7 @@ export function describeUnselectedRoles(selection: RowSelection): string[] {
   const missing: string[] = [];
   if (selection.dateSource === 'sheet' && selection.dateColumn === null) missing.push('Date');
   if (selection.timeSource === 'sheet' && selection.timeColumn === null) missing.push('Time');
+  if (selection.matchMode === 'byName' && selection.nameColumn === null) missing.push('Name');
   return missing;
 }
 
@@ -188,6 +201,9 @@ export function extractTimestampRows(
   const manualDateError = isManualDate ? dateErrorFor(manualDate) : null;
   const manualTimeError = isManualTime ? timeErrorFor(manualTime) : null;
 
+  // Filename matching reads one extra cell per row (the name to match).
+  const isByName = selection.matchMode === 'byName' && selection.nameColumn !== null;
+
   const firstIndex = Math.max(startRow, headerRow + 1) - 1; // 0-based
   for (let i = firstIndex; i < sheet.rows.length; i += 1) {
     const raw = sheet.rows[i] ?? [];
@@ -203,6 +219,9 @@ export function extractTimestampRows(
       dateError: isManualDate ? manualDateError : dateErrorFor(date),
       time,
       sheetRowNumber: i + 1,
+      ...(isByName
+        ? { name: (raw[selection.nameColumn as number] ?? '').trim() }
+        : {}),
       error: isManualTime ? manualTimeError : timeErrorFor(time),
     });
   }

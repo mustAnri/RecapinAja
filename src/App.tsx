@@ -4,7 +4,7 @@
  *
  *   1. List Jam   — paste the Google Spreadsheet link (source of the times)
  *   2. Foto       — pick the local folder with the raw photos
- *   3. Crop 1:1   — draw the manual crop once, applied to every photo
+ *   3. Atur Timestamp — pilih posisi timestamp; crop 1:1 opsional untuk semua foto
  *   4. Tanggal    — date from a spreadsheet column or one manual value
  *   5. Kolom Jam  — worksheet / rows / time source + review mapping
  *   6. Proses     — run the batch into a chosen output folder
@@ -14,7 +14,7 @@
 import { useMemo, useRef, useState } from 'react';
 import type { ImportedSheet, RowSelection } from './types/spreadsheet';
 import { EMPTY_SELECTION } from './types/spreadsheet';
-import type { BatchOutput, BatchProgress, CropTemplate } from './types/processing';
+import type { BatchOutput, BatchProgress, CropTemplate, TimestampPosition } from './types/processing';
 import {
   FilesystemError,
   PickerCancelledError,
@@ -25,19 +25,23 @@ import {
   type FolderSelection,
 } from './services/filesystem';
 import { loadSpreadsheet } from './services/spreadsheet';
+import { parseDelimitedText } from './services/spreadsheet/csvParser';
 import {
   applyRowOverrides,
   extractTimestampRows,
   guessDateColumn,
+  guessNameColumn,
   guessTimeColumn,
+  parseSheetValues,
   rowHeaders,
   type RowOverrides,
 } from './services/spreadsheet/parse';
-import { buildSequentialMapping } from './services/mapping';
+import { applyManualPairs, buildAutoPairs, mappingFromPairs } from './services/mapping';
 import { processBatch } from './services/batchProcessor';
-import { sortPhotosByFilename } from './utils/imageOrdering';
 import { DEFAULT_FORMAT_ID, formatTimestamp, parseDateCell, parseTimeCell } from './utils/dateFormatter';
-import { Button, ErrorBanner, Guide, Icons } from './components/ui';
+import { sortPhotosByFilename } from './utils/imageOrdering';
+import { Button, ErrorBanner, Guide, Icons, Tilt3D } from './components/ui';
+import { Background3D } from './components/Background3D/Background3D';
 import { FolderSelector } from './components/FolderSelector/FolderSelector';
 import { SpreadsheetUrlInput } from './components/SpreadsheetUrlInput/SpreadsheetUrlInput';
 import { ColumnSelector } from './components/ColumnSelector/ColumnSelector';
@@ -60,8 +64,8 @@ const STEPS = [
     icon: Icons.image,
   },
   {
-    title: 'Crop 1:1',
-    subtitle: 'Tentukan area crop satu kali untuk semua foto',
+    title: 'Atur Timestamp',
+    subtitle: 'Posisi timestamp + crop 1:1 opsional untuk semua foto',
     icon: Icons.settings,
   },
   {
@@ -104,7 +108,7 @@ const NO_SHEET: ImportedSheet = {
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-fuchsia-500 text-white shadow-lg shadow-indigo-500/30">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-fuchsia-500 text-white shadow-lg shadow-indigo-500/40 ring-1 ring-white/20">
         <Icons.logo className="h-5 w-5" />
       </div>
       <div>
@@ -129,22 +133,24 @@ function PageHeading({
   badge?: string;
 }) {
   return (
-    <div className="flex items-start gap-4">
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500/15 to-violet-500/15 text-indigo-600 ring-1 ring-inset ring-indigo-500/20">
-        <Icon className="h-5 w-5" />
-      </div>
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <h1 className="text-lg font-bold tracking-tight text-slate-900">{title}</h1>
-          {badge && (
-            <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-inset ring-indigo-200/60">
-              {badge}
-            </span>
-          )}
+    <Tilt3D maxTilt={4} glare={false} className="anim-fade-up">
+      <div key={title} className="flex items-start gap-4">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500/15 to-violet-500/15 text-indigo-600 ring-1 ring-inset ring-indigo-500/20">
+          <Icon className="h-5 w-5" />
         </div>
-        <p className="mt-0.5 text-sm text-slate-500">{description}</p>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-lg font-bold tracking-tight text-slate-900">{title}</h1>
+            {badge && (
+              <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-600 ring-1 ring-inset ring-indigo-200/60">
+                {badge}
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-sm text-slate-500">{description}</p>
+        </div>
       </div>
-    </div>
+    </Tilt3D>
   );
 }
 
@@ -178,6 +184,18 @@ export default function App() {
 
   /** Per-row manual edits made in the mapping preview (replace/edit cells). */
   const [overrides, setOverrides] = useState<RowOverrides>({});
+
+  /**
+   * Manual photo → row assignments made in the mapping preview:
+   * filename → row index into the extracted rows, or `null` when the user
+   * explicitly un-paired a photo (copied as-is, no timestamp).
+   */
+  const [manualPairs, setManualPairs] = useState<Map<string, number | null>>(new Map());
+
+  /** Single fixed display format — no user-facing format choice. */
+  const formatId = DEFAULT_FORMAT_ID;
+  /** Where the timestamp text is anchored on the final (cropped) photo. */
+  const [position, setPosition] = useState<TimestampPosition>('bottom-right');
 
   // Steps 6/7 — batch run
   const [progress, setProgress] = useState<BatchProgress | null>(null);
@@ -215,10 +233,22 @@ export default function App() {
     return { ...base, rows: applyRowOverrides(base.rows, overrides) };
   }, [sheet, selection, dateInput, timeInput, photos.length, fullyManual, overrides]);
 
-  const mapping = useMemo(
-    () => (extracted ? buildSequentialMapping(photos, extracted.rows) : null),
-    [photos, extracted],
+  /** Auto-strategy pairs (filename → row index) for the chosen match mode. */
+  const autoPairs = useMemo(
+    () => (extracted ? buildAutoPairs(selection.matchMode, photos, extracted.rows) : null),
+    [photos, extracted, selection.matchMode],
   );
+
+  /** Final pairs after the user's manual assignments are layered on top. */
+  const finalPairs = useMemo(() => {
+    if (!extracted || !autoPairs) return new Map<string, number>();
+    return applyManualPairs(photos, extracted.rows, autoPairs, manualPairs);
+  }, [photos, extracted, autoPairs, manualPairs]);
+
+  const mapping = useMemo(() => {
+    if (!extracted || !autoPairs) return null;
+    return mappingFromPairs(photos, extracted.rows, finalPairs);
+  }, [photos, extracted, autoPairs, finalPairs]);
 
   /** Row numbers the user has manually edited in the preview. */
   const editedRowNumbers = useMemo(
@@ -233,11 +263,13 @@ export default function App() {
     setGidSelection(loaded.gid);
     setOutput(null);
     setOverrides({}); // new data — old manual edits no longer apply
+    setManualPairs(new Map()); // new data — old row assignments no longer apply
     const headers = rowHeaders(loaded, 1);
     setSelection((prev) => ({
       ...prev,
       timeColumn: guessTimeColumn(headers),
       dateColumn: guessDateColumn(headers),
+      nameColumn: guessNameColumn(headers),
     }));
   };
 
@@ -250,6 +282,31 @@ export default function App() {
       setStep((s) => (s === 0 ? 1 : s));
     } catch (error) {
       setSheetError(error instanceof Error ? error.message : 'Unable to load the spreadsheet.');
+    } finally {
+      setSheetLoading(false);
+    }
+  };
+
+  /** Local CSV/TSV import — the file is parsed entirely in the browser. */
+  const handleImportCsv = async (file: File) => {
+    setSheetLoading(true);
+    setSheetError(null);
+    try {
+      const text = await file.text();
+      const { headers, rows } = parseSheetValues(parseDelimitedText(text));
+      if (rows.length < 2) {
+        throw new Error('File CSV tidak berisi baris data — hanya header yang ditemukan.');
+      }
+      applyLoadedSheet({
+        sourceTitle: file.name,
+        spreadsheetId: null,
+        gid: 0,
+        headers,
+        rows,
+      });
+      setStep((s) => (s === 0 ? 1 : s));
+    } catch (error) {
+      setSheetError(error instanceof Error ? error.message : 'Unable to read that CSV file.');
     } finally {
       setSheetLoading(false);
     }
@@ -275,6 +332,33 @@ export default function App() {
       [sheetRowNumber]: { ...prev[sheetRowNumber], [field]: value },
     }));
   };
+
+  /** Manual assignment from the mapping preview: pair a photo with a row. */
+  const handleAssignRow = (filename: string, rowIndex: number | null) => {
+    setManualPairs((prev) => {
+      const next = new Map(prev);
+      next.set(filename, rowIndex);
+      return next;
+    });
+    setOutput(null); // the previous run no longer reflects this mapping
+  };
+
+  /** Undo one manual assignment — the photo falls back to the auto strategy. */
+  const handleResetPair = (filename: string) => {
+    setManualPairs((prev) => {
+      if (!prev.has(filename)) return prev;
+      const next = new Map(prev);
+      next.delete(filename);
+      return next;
+    });
+    setOutput(null);
+  };
+
+  /** Undo every manual assignment at once. */
+  const handleResetAllPairs = () => {
+    setManualPairs(new Map());
+    setOutput(null);
+  };
   /* --------------------------- step 2: photos ---------------------------- */
 
   const handlePickFolder = async () => {
@@ -284,6 +368,7 @@ export default function App() {
       setFolder(picked);
       setTemplate(null); // crop depends on the photo set
       setOutput(null);
+      setManualPairs(new Map()); // new photo set — old assignments no longer apply
     } catch (error) {
       if (error instanceof PickerCancelledError) return;
       setFolderError(error instanceof Error ? error.message : 'Unable to open that folder.');
@@ -297,13 +382,13 @@ export default function App() {
     photos.length > 0 &&
     !!mapping &&
     mapping.entries.length > 0 &&
-    !!template &&
     dateReady &&
     timeReady &&
+    (selection.matchMode === 'sequential' || selection.nameColumn !== null) &&
     !progress;
 
   const handleProcess = async () => {
-    if (!canProcess || !mapping || !template) return;
+    if (!canProcess || !mapping) return;
     setBatchError(null);
 
     let outputFolder;
@@ -323,8 +408,8 @@ export default function App() {
     try {
       const result = await processBatch(mapping.entries, {
         crop: template,
-        formatId: DEFAULT_FORMAT_ID,
-        position: 'bottom-right',
+        formatId,
+        position,
         outputFolder,
         extraPhotos: mapping.extraPhotos,
         onProgress: (p) => {
@@ -357,6 +442,7 @@ export default function App() {
     setDateInput('');
     setTimeInput('');
     setOverrides({});
+    setManualPairs(new Map());
     setProgress(null);
     setOutput(null);
     setBatchError(null);
@@ -370,8 +456,6 @@ export default function App() {
   const missing: { label: string; step: StepIndex }[] = [];
   if (!sheet) missing.push({ label: 'Spreadsheet belum dimuat', step: 0 });
   if (photos.length === 0) missing.push({ label: 'Folder foto belum dipilih', step: 1 });
-  if (photos.length > 0 && !template)
-    missing.push({ label: 'Crop 1:1 belum dikonfirmasi', step: 2 });
   if (selection.dateSource === 'sheet') {
     if (selection.dateColumn === null)
       missing.push({ label: 'Kolom tanggal belum dipilih', step: 3 });
@@ -384,6 +468,8 @@ export default function App() {
   } else if (!timeValid) {
     missing.push({ label: 'Jam manual belum diisi / tidak valid', step: 4 });
   }
+  if (selection.matchMode === 'byName' && selection.nameColumn === null)
+    missing.push({ label: 'Kolom nama belum dipilih', step: 4 });
   if (sheet && photos.length > 0 && (!mapping || mapping.entries.length === 0))
     missing.push({ label: 'Belum ada pasangan foto ↔ jam', step: 4 });
 
@@ -394,7 +480,7 @@ export default function App() {
       case 1:
         return photos.length > 0;
       case 2:
-        return !!template;
+        return true; // posisi timestamp selalu siap; crop opsional
       case 3:
         return dateReady;
       case 4:
@@ -456,7 +542,8 @@ export default function App() {
   /* Mode Cepat — dedicated simple tabs, no spreadsheet needed. */
   if (mode === 'cepat') {
     return (
-      <div className="app-bg min-h-screen">
+      <div className="min-h-screen">
+        <Background3D />
         <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/80 backdrop-blur-md">
           <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
             <Brand compact />
@@ -481,7 +568,8 @@ export default function App() {
   }
 
   return (
-    <div className="app-bg min-h-screen">
+    <div className="min-h-screen">
+      <Background3D />
       {/* ------------------------- sidebar (desktop) ------------------------ */}
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-72 flex-col border-r border-slate-800/80 bg-slate-950 lg:flex">
         <div className="px-5 pb-6 pt-6">
@@ -494,7 +582,7 @@ export default function App() {
           </p>
         </div>
 
-        <nav aria-label="Workflow steps" className="flex-1 space-y-1 overflow-y-auto px-3 pb-4">
+        <nav aria-label="Workflow steps" className="sidebar-scroll flex-1 space-y-1 overflow-y-auto px-3 pb-4">
           {STEPS.map((stepMeta, index) => {
             const isActive = index === step;
             const done = stepDone(index as StepIndex);
@@ -504,16 +592,16 @@ export default function App() {
                 key={stepMeta.title}
                 type="button"
                 onClick={() => setStep(index as StepIndex)}
-                className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition ${
-                  isActive ? 'bg-white/10 ring-1 ring-inset ring-white/10' : 'hover:bg-white/5'
+                className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-all duration-200 hover:translate-x-0.5 ${
+                  isActive ? 'bg-white/10 shadow-lg shadow-indigo-950/40 ring-1 ring-inset ring-white/15' : 'hover:bg-white/5'
                 }`}
               >
                 <span
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold ${
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold transition-all duration-300 ${
                     done
                       ? 'bg-gradient-to-br from-indigo-500 to-violet-500 text-white shadow-md shadow-indigo-500/30'
                       : isActive
-                        ? 'bg-white/10 text-white ring-1 ring-inset ring-white/20'
+                        ? 'glow-pulse bg-white/10 text-white ring-1 ring-inset ring-white/20'
                         : 'bg-white/5 text-slate-400'
                   }`}
                 >
@@ -541,7 +629,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="mx-3 mb-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+        <Tilt3D className="mx-3 mb-4 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           <p className="flex items-center gap-2 text-xs font-semibold text-slate-200">
             <Icons.lock className="h-4 w-4 text-emerald-400" />
             100% client-side
@@ -550,7 +638,7 @@ export default function App() {
             Crop, timestamp, dan penyimpanan berjalan di browser. Foto tidak pernah diunggah ke
             server mana pun.
           </p>
-        </div>
+        </Tilt3D>
       </aside>
 
       {/* ------------------------------ main -------------------------------- */}
@@ -617,7 +705,7 @@ export default function App() {
           {/* workflow progress bar */}
           <div className="h-0.5 w-full bg-slate-100">
             <div
-              className="h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 transition-all duration-500"
+              className="shimmer h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-fuchsia-500 transition-all duration-500"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
@@ -632,20 +720,22 @@ export default function App() {
               badge={step === 6 ? 'Batch selesai' : undefined}
             />
 
+            <div key={step} className="anim-step space-y-6">
             {step === 0 && (
               <>
                 <Guide
                   steps={[
-                    'Buka Google Sheets yang berisi daftar jam test drive.',
-                    'Pastikan sheet dibagikan sebagai “Anyone with the link” (atau Publish to web).',
-                    'Salin URL dari address bar, tempel di bawah, lalu klik “Muat spreadsheet”.',
-                    'Setelah berhasil dimuat, lanjut ke langkah berikutnya — kolom jam bisa diatur nanti di langkah 5.',
+                    'Punya link Google Sheets? Pastikan dibagikan “Anyone with the link”, tempel URL, lalu klik “Muat spreadsheet”.',
+                    'Punya file CSV (mis. export Google Forms)? Klik “Unggah file CSV” — file dibaca lokal, tidak diunggah ke mana pun.',
+                    'Kolom tanggal, jam, dan nama diprediksi otomatis dari header — bisa dikoreksi di langkah 4 & 5.',
+                    'Setelah data dimuat, lanjut ke langkah berikutnya.',
                   ]}
                 />
                 <SpreadsheetUrlInput
                   url={sheetUrl}
                   onUrl={setSheetUrl}
                   onLoad={handleLoadUrl}
+                  onImportCsv={handleImportCsv}
                   loading={sheetLoading}
                   error={sheetError}
                   disabled={!!progress}
@@ -703,9 +793,10 @@ export default function App() {
               <>
                 <Guide
                   steps={[
-                    'Pilih salah satu foto sebagai preview.',
+                    'Pilih posisi timestamp (6 titik) — kotak “timestamp” di preview menunjukkan letaknya.',
+                    'Crop 1:1 opsional: aktifkan toggle bila ingin semua foto dipotong perse.',
                     'Geser kotak putih ke area yang diinginkan, tarik sudut kanan bawah untuk mengubah ukuran.',
-                    'Klik “Confirm crop” — posisi disimpan proporsional dan dipakai ke semua foto.',
+                    'Klik “Confirm crop” bila memakai crop — tanpa crop pun langkah ini langsung siap.',
                   ]}
                 />
                 <CropEditor
@@ -715,6 +806,8 @@ export default function App() {
                     setTemplate(t);
                     setStep(3);
                   }}
+                  position={position}
+                  onPositionChange={setPosition}
                   disabled={!!progress}
                 />
                 <div className="flex items-center justify-between gap-3">
@@ -722,11 +815,6 @@ export default function App() {
                     <Icons.arrowLeft className="h-4 w-4" />
                     Kembali
                   </Button>
-                  {!template && (
-                    <p className="text-xs text-slate-400">
-                      Hint: konfirmasi crop dulu dengan tombol di panel atas.
-                    </p>
-                  )}
                   <Button onClick={() => setStep(3)}>
                     Lanjut ke tanggal
                     <Icons.arrowRight className="h-4 w-4" />
@@ -754,7 +842,7 @@ export default function App() {
                   onDateSource={(source) => setSelection({ ...selection, dateSource: source })}
                   onDateColumn={(column) => setSelection({ ...selection, dateColumn: column })}
                   onDateChange={setDateInput}
-                  formatId={DEFAULT_FORMAT_ID}
+                  formatId={formatId}
                   disabled={!!progress}
                 />
                 <div className="flex items-center justify-between gap-3">
@@ -784,6 +872,7 @@ export default function App() {
                     'Pilih worksheet (gid) jika data bukan di tab pertama.',
                     'Atur baris header dan baris awal data bila terdeteksi salah.',
                     'Pilih sumber jam: kolom spreadsheet (satu jam per baris) atau satu jam manual untuk semua foto.',
+                    'Pilih cara memasangkan foto ↔ baris: berurutan, atau berdasarkan nama file ↔ kolom nama.',
                     'Periksa tabel pasangan foto ↔ timestamp di bawah sebelum lanjut.',
                   ]}
                 />
@@ -807,16 +896,24 @@ export default function App() {
                           Review mapping sebelum proses
                         </h2>
                         <p className="mt-1 text-xs text-slate-500">
-                          Foto diurutkan berdasarkan nama file lalu dipasangkan berurutan dengan
-                          list timestamp. Periksa pasangan di bawah sebelum menjalankan proses.
+                          {selection.matchMode === 'byName'
+                            ? 'Nama file foto dicocokkan dengan kolom nama dari spreadsheet. Periksa pasangan di bawah sebelum menjalankan proses.'
+                            : 'Foto diurutkan berdasarkan nama file lalu dipasangkan berurutan dengan list timestamp. Periksa pasangan di bawah sebelum menjalankan proses.'}
                         </p>
                         <div className="mt-5">
                           <MappingPreview
                             mapping={mapping}
-                            formatId={DEFAULT_FORMAT_ID}
+                            formatId={formatId}
                             onEditCell={handleEditCell}
                             editedRows={editedRowNumbers}
+                            nameMode={selection.matchMode === 'byName'}
                             disabled={!!progress}
+                            allRows={extracted?.rows ?? []}
+                            pairIndexes={finalPairs}
+                            manualPairs={manualPairs}
+                            onAssignRow={handleAssignRow}
+                            onResetPair={handleResetPair}
+                            onResetAllPairs={handleResetAllPairs}
                           />
                         </div>
                       </div>
@@ -929,7 +1026,7 @@ export default function App() {
                         Tanggal:{' '}
                         {selection.dateSource === 'manual'
                           ? dateValid
-                            ? formatTimestamp(dateInput.trim(), '00:00', DEFAULT_FORMAT_ID).replace(
+                            ? formatTimestamp(dateInput.trim(), '00:00', formatId).replace(
                                 ' 00:00',
                                 '',
                               )
@@ -1024,23 +1121,26 @@ export default function App() {
                     </div>
                   </>
                 ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
-                    <Icons.file className="mx-auto h-8 w-8 text-slate-300" />
-                    <p className="mt-3 text-sm font-semibold text-slate-700">
-                      Belum ada hasil batch
-                    </p>
-                    <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
-                      Jalankan proses dulu di langkah 6. Setelah selesai, ringkasan hasil akan
-                      tampil di sini.
-                    </p>
-                    <Button variant="secondary" className="mt-4" onClick={() => setStep(5)}>
-                      <Icons.refresh className="h-4 w-4" />
-                      Ke langkah Proses
-                    </Button>
-                  </div>
+                  <Tilt3D maxTilt={3} glare={false}>
+                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
+                      <Icons.file className="anim-float mx-auto h-8 w-8 text-slate-300" />
+                      <p className="mt-3 text-sm font-semibold text-slate-700">
+                        Belum ada hasil batch
+                      </p>
+                      <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
+                        Jalankan proses dulu di langkah 6. Setelah selesai, ringkasan hasil akan
+                        tampil di sini.
+                      </p>
+                      <Button variant="secondary" className="mt-4" onClick={() => setStep(5)}>
+                        <Icons.refresh className="h-4 w-4" />
+                        Ke langkah Proses
+                      </Button>
+                    </div>
+                  </Tilt3D>
                 )}
               </>
             )}
+            </div>
           </div>
         </main>
 

@@ -19,8 +19,8 @@ export class ImageProcessingError extends Error {}
 export interface ProcessPhotoOptions {
   /** Combined timestamp string, e.g. "20 Mei 2022 14:09". */
   timestamp: string;
-  /** The confirmed crop template from the preview photo (§19). */
-  crop: CropTemplate;
+  /** Confirmed crop template (§19), or null to keep the full photo. */
+  crop: CropTemplate | null;
   position?: TimestampPosition;
   style?: TimestampStyle;
   /** JPEG quality for .jpg/.jpeg outputs (0-1). Default 0.92. */
@@ -130,12 +130,13 @@ export function centerSquareTemplate(width: number, height: number): CropTemplat
 
 function drawTimestamp(
   ctx: CanvasRenderingContext2D,
-  canvasSize: number,
+  canvasWidth: number,
+  canvasHeight: number,
   timestamp: string,
   position: TimestampPosition,
   style: TimestampStyle,
 ): void {
-  const fontSize = resolveFontSize(canvasSize, style);
+  const fontSize = resolveFontSize(Math.min(canvasWidth, canvasHeight), style);
   const padding = fontSize * style.paddingRatio;
   const margin = fontSize * style.marginRatio;
 
@@ -151,7 +152,7 @@ function drawTimestamp(
 
   const boxWidth = textWidth + padding * 2;
   const boxHeight = textHeight + padding * 2;
-  const { x, y } = resolveBoxPosition(position, canvasSize, canvasSize, boxWidth, boxHeight, margin);
+  const { x, y } = resolveBoxPosition(position, canvasWidth, canvasHeight, boxWidth, boxHeight, margin);
 
   // Subtle background pill for readability (§25).
   if (style.background) {
@@ -175,8 +176,9 @@ function drawTimestamp(
 }
 
 /**
- * Full per-photo pipeline (§27): decode -> crop template -> timestamp
- * overlay -> encode. Throws ImageProcessingError with a human-readable
+ * Full per-photo pipeline (§27): decode -> optional crop template ->
+ * timestamp overlay -> encode. With `crop: null` the photo keeps its
+ * original framing. Throws ImageProcessingError with a human-readable
  * message; callers record the failure and continue with other photos (§32).
  */
 export async function processPhoto(
@@ -206,21 +208,42 @@ export async function processPhoto(
       throw new ImageProcessingError('Unable to process image: no pixel data.');
     }
 
-    const crop = applyCropTemplate(width, height, options.crop);
-    if (!crop) {
-      throw new ImageProcessingError(
-        'The crop template cannot be applied to this image (resolution too small).',
-      );
+    // Geometry: either the proportional crop square, or the full photo.
+    let sx = 0;
+    let sy = 0;
+    let sourceW = width;
+    let sourceH = height;
+    let outW = width;
+    let outH = height;
+
+    if (options.crop) {
+      const crop = applyCropTemplate(width, height, options.crop);
+      if (!crop) {
+        throw new ImageProcessingError(
+          'The crop template cannot be applied to this image (resolution too small).',
+        );
+      }
+      sx = crop.sx;
+      sy = crop.sy;
+      sourceW = crop.side;
+      sourceH = crop.side;
+      outW = crop.side;
+      outH = crop.side;
     }
 
-    let outputSide = crop.side;
-    if (options.maxOutputSize && outputSide > options.maxOutputSize) {
-      outputSide = options.maxOutputSize;
+    // Stability cap: scale large outputs down proportionally.
+    if (options.maxOutputSize) {
+      const longest = Math.max(outW, outH);
+      if (longest > options.maxOutputSize) {
+        const factor = options.maxOutputSize / longest;
+        outW = Math.max(1, Math.round(outW * factor));
+        outH = Math.max(1, Math.round(outH * factor));
+      }
     }
 
     const canvas = document.createElement('canvas');
-    canvas.width = outputSide;
-    canvas.height = outputSide;
+    canvas.width = outW;
+    canvas.height = outH;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
       throw new ImageProcessingError('Canvas 2D context is unavailable.');
@@ -228,9 +251,9 @@ export async function processPhoto(
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    ctx.drawImage(image, crop.sx, crop.sy, crop.side, crop.side, 0, 0, outputSide, outputSide);
+    ctx.drawImage(image, sx, sy, sourceW, sourceH, 0, 0, outW, outH);
 
-    drawTimestamp(ctx, outputSide, options.timestamp, position, style);
+    drawTimestamp(ctx, outW, outH, options.timestamp, position, style);
 
     const mimeType = outputMimeType(file.name);
     const blob = await new Promise<Blob | null>((resolve) => {
@@ -239,7 +262,7 @@ export async function processPhoto(
     if (!blob) {
       throw new ImageProcessingError('Image encoding failed.');
     }
-    return { blob, mimeType, width: outputSide, height: outputSide };
+    return { blob, mimeType, width: outW, height: outH };
   } finally {
     if (typeof ImageBitmap !== 'undefined' && image instanceof ImageBitmap) {
       image.close();

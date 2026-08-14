@@ -6,6 +6,7 @@ import {
   describeUnselectedRoles,
   extractTimestampRows,
   guessDateColumn,
+  guessNameColumn,
   guessTimeColumn,
   isSelectionComplete,
   parseSheetValues,
@@ -25,6 +26,8 @@ const SHEET_SELECTION: RowSelection = {
   dateColumn: 1,
   dateSource: 'sheet',
   timeSource: 'sheet',
+  matchMode: 'sequential',
+  nameColumn: null,
   headerRow: 1,
   startRow: 2,
 };
@@ -66,6 +69,28 @@ describe('column guessing', () => {
   it('returns null when nothing matches', () => {
     expect(guessTimeColumn(['No', 'Nama'])).toBeNull();
     expect(guessDateColumn(['No', 'Nama'])).toBeNull();
+  });
+
+  it('prefers the customer column when several headers contain "nama"', () => {
+    const headers = [
+      'Timestamp',
+      'Nama Sales',
+      'Nama Customer',
+      'No. Hp',
+      'Tanggal Test Drive',
+      'Start Test Drive',
+    ];
+    expect(guessNameColumn(headers)).toBe(2);
+  });
+
+  it('falls back to a plain name header', () => {
+    expect(guessNameColumn(['No', 'Nama', 'Jam'])).toBe(1);
+    expect(guessNameColumn(['Name', 'Time'])).toBe(0);
+  });
+
+  it('never mistakes the Timestamp column for the time column', () => {
+    // Real export trap: "Timestamp" must not match the "time" hint.
+    expect(guessTimeColumn(['Timestamp', 'Nama Customer', 'Start Test Drive'])).toBe(2);
   });
 });
 
@@ -200,6 +225,8 @@ describe('extractTimestampRows (independent sources)', () => {
         dateColumn: null,
         dateSource: 'manual',
         timeSource: 'sheet',
+        matchMode: 'sequential',
+        nameColumn: null,
         headerRow: 1,
         startRow: 2,
       },
@@ -224,6 +251,8 @@ describe('extractTimestampRows (fully manual — no sheet)', () => {
     dateColumn: null,
     dateSource: 'manual',
     timeSource: 'manual',
+    matchMode: 'sequential',
+    nameColumn: null,
     headerRow: 1,
     startRow: 2,
   };

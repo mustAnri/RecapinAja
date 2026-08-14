@@ -1,4 +1,5 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { ButtonHTMLAttributes, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 
 /* ------------------------------------------------------------------ */
 /* Icons (inline SVG, stroke style)                                    */
@@ -187,22 +188,25 @@ export const Icons = {
 
 /* ------------------------------------------------------------------ */
 /* Primitives                                                          */
-/* ------------------------------------------------------------------ */
 export function Card({
   title,
   subtitle,
   actions,
   children,
   padded = true,
+  className = '',
 }: {
   title?: string;
   subtitle?: string;
   actions?: ReactNode;
   children: ReactNode;
   padded?: boolean;
+  className?: string;
 }) {
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-900/5">
+    <section
+      className={`anim-fade-up overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-900/5 ${className}`}
+    >
       {(title || actions) && (
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-4">
           <div>
@@ -237,15 +241,54 @@ export function Button({
   variant = 'primary',
   className = '',
   type = 'button',
+  onClick,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+  const handleClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    // Interactive feedback: a ripple grows from the exact click point.
+    const el = event.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const size = Math.max(rect.width, rect.height) * 2.2;
+    const ripple = document.createElement('span');
+    ripple.className = 'ripple';
+    ripple.style.width = `${size}px`;
+    ripple.style.height = `${size}px`;
+    ripple.style.left = `${event.clientX - rect.left - size / 2}px`;
+    ripple.style.top = `${event.clientY - rect.top - size / 2}px`;
+    ripple.style.background =
+      variant === 'primary' ? 'rgb(255 255 255 / 0.35)' : 'rgb(99 102 241 / 0.18)';
+    el.appendChild(ripple);
+    window.setTimeout(() => ripple.remove(), 650);
+    onClick?.(event);
+  };
   return (
     <button
       type={type}
-      className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition-all focus-visible:outline-none disabled:cursor-not-allowed ${BUTTON_STYLES[variant]} ${className}`}
+      onClick={handleClick}
+      className={`relative inline-flex items-center justify-center gap-2 overflow-hidden rounded-xl px-4 py-2.5 text-sm font-semibold transition-all duration-200 active:scale-[0.97] focus-visible:outline-none disabled:cursor-not-allowed ${BUTTON_STYLES[variant]} ${className}`}
       {...rest}
     />
   );
+}
+
+/** Animated number — counts up from 0 whenever `value` changes. */
+export function CountUp({ value, duration = 700 }: { value: number; duration?: number }) {
+  const [display, setDisplay] = useState(0);
+
+  useEffect(() => {
+    let frame = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      setDisplay(Math.round(value * eased));
+      if (t < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [value, duration]);
+
+  return <>{display}</>;
 }
 
 type BadgeTone = 'slate' | 'emerald' | 'red' | 'amber' | 'indigo' | 'sky';
@@ -268,7 +311,7 @@ export function Badge({
 }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${BADGE_TONES[tone]}`}
+      className={`anim-pop inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset ${BADGE_TONES[tone]}`}
     >
       {children}
     </span>
@@ -295,13 +338,15 @@ export function StatCard({
     sky: 'text-sky-600',
   };
   return (
-    <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm shadow-slate-900/5">
-      <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
-      <p className={`mt-1.5 text-2xl font-bold tabular-nums tracking-tight ${valueColor[tone]}`}>
-        {value}
-      </p>
-      {hint && <p className="mt-0.5 text-xs text-slate-400">{hint}</p>}
-    </div>
+    <Tilt3D maxTilt={6} glare={false} className="rounded-2xl">
+      <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm shadow-slate-900/5">
+        <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+        <p className={`mt-1.5 text-2xl font-bold tabular-nums tracking-tight ${valueColor[tone]}`}>
+          {typeof value === 'number' ? <CountUp value={value} /> : value}
+        </p>
+        {hint && <p className="mt-0.5 text-xs text-slate-400">{hint}</p>}
+      </div>
+    </Tilt3D>
   );
 }
 
@@ -391,7 +436,7 @@ export function WarningBanner({ title, children }: { title: string; children: Re
 /** Tutorial/hint panel shown at the top of each step. */
 export function Guide({ title = 'Panduan langkah ini', steps }: { title?: string; steps: ReactNode[] }) {
   return (
-    <div className="rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50/70 to-violet-50/40 px-5 py-4">
+    <div className="anim-fade-up rounded-2xl border border-indigo-100 bg-gradient-to-r from-indigo-50/70 to-violet-50/40 px-5 py-4">
       <p className="flex items-center gap-2 text-[13px] font-semibold text-indigo-900">
         <Icons.bulb className="h-4 w-4 text-indigo-500" />
         {title}
@@ -423,7 +468,7 @@ export function Tabs<T extends string>({
           role="tab"
           aria-selected={active === tab.id}
           onClick={() => onChange(tab.id)}
-          className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-colors ${
+          className={`rounded-lg px-4 py-1.5 text-sm font-medium transition-all duration-200 ${
             active === tab.id
               ? 'bg-white text-slate-900 shadow-sm'
               : 'text-slate-500 hover:text-slate-700'
@@ -432,6 +477,64 @@ export function Tabs<T extends string>({
           {tab.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Tilt3D — perspective card that follows the cursor (subtle 3D)       */
+/* ------------------------------------------------------------------ */
+
+export function Tilt3D({
+  children,
+  className = '',
+  maxTilt = 8,
+  glare = true,
+}: {
+  children: ReactNode;
+  className?: string;
+  maxTilt?: number;
+  glare?: boolean;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  const handleMove = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const px = (event.clientX - rect.left) / rect.width - 0.5;
+    const py = (event.clientY - rect.top) / rect.height - 0.5;
+    el.style.transform = `perspective(900px) rotateX(${(-py * maxTilt).toFixed(2)}deg) rotateY(${(px * maxTilt).toFixed(2)}deg) translateZ(8px)`;
+    if (glare) {
+      el.style.setProperty('--glare-x', `${((px + 0.5) * 100).toFixed(1)}%`);
+      el.style.setProperty('--glare-y', `${((py + 0.5) * 100).toFixed(1)}%`);
+    }
+  };
+
+  const handleLeave = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.transform = 'perspective(900px) rotateX(0deg) rotateY(0deg) translateZ(0)';
+  };
+
+  return (
+    <div
+      ref={ref}
+      onMouseMove={handleMove}
+      onMouseLeave={handleLeave}
+      className={`tilt-card preserve-3d group/tilt relative ${className}`}
+    >
+      {children}
+      {glare && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-[inherit] opacity-0 transition-opacity duration-300 group-hover/tilt:opacity-100"
+          style={{
+            background:
+              'radial-gradient(24rem 16rem at var(--glare-x, 50%) var(--glare-y, 50%), rgb(255 255 255 / 0.22), transparent 70%)',
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -42,6 +42,13 @@ export interface RowSelection {
   dateSource: ValueSource;
   /** Where times come from: the time column or one manual time. */
   timeSource: ValueSource;
+  /** How photos are paired with rows: in order, or by filename ↔ name cell. */
+  matchMode: 'sequential' | 'byName';
+  /**
+   * Column holding the name matched against photo filenames
+   * (only used when `matchMode` is `'byName'`).
+   */
+  nameColumn: number | null;
   /** 1-based spreadsheet row containing the headers (usually 1). */
   headerRow: number;
   /**
@@ -59,6 +66,8 @@ export const EMPTY_SELECTION: RowSelection = {
   dateColumn: null,
   dateSource: 'sheet',
   timeSource: 'sheet',
+  matchMode: 'sequential',
+  nameColumn: null,
   headerRow: DEFAULT_HEADER_ROW,
   startRow: DEFAULT_START_ROW,
 };
@@ -78,6 +87,8 @@ export interface SpreadsheetRow {
   time: string;
   /** 1-based row number in the spreadsheet — used in user-facing messages. */
   sheetRowNumber: number;
+  /** Name cell for filename matching (`matchMode` 'byName'); may be absent. */
+  name?: string;
   /** Validation problem for the time, or null when the row is usable. */
   error: string | null;
 }

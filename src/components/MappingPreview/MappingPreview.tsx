@@ -1,6 +1,7 @@
-import type { SequentialMapping } from '../../types/spreadsheet';
+import { useEffect, useMemo } from 'react';
+import type { SequentialMapping, SpreadsheetRow } from '../../types/spreadsheet';
 import { formatTimestamp, parseDateCell, parseTimeCell } from '../../utils/dateFormatter';
-import { Badge, Icons, InfoBanner, StatCard, TableShell, WarningBanner } from '../ui';
+import { Badge, Button, Icons, InfoBanner, StatCard, TableShell, WarningBanner } from '../ui';
 
 interface MappingPreviewProps {
   mapping: SequentialMapping;
@@ -13,7 +14,21 @@ interface MappingPreviewProps {
   onEditCell?: (sheetRowNumber: number, field: 'date' | 'time', value: string) => void;
   /** Row numbers the user has edited manually (shows an "edited" badge). */
   editedRows?: ReadonlySet<number>;
+  /** True when pairs came from filename matching (shows the name column). */
+  nameMode?: boolean;
   disabled?: boolean;
+  /** All extracted rows — the choices offered by the manual row picker. */
+  allRows?: SpreadsheetRow[];
+  /** Effective pairing after manual assignments (filename → row index). */
+  pairIndexes?: ReadonlyMap<string, number>;
+  /** The user's explicit manual assignments (filename → row index or null). */
+  manualPairs?: ReadonlyMap<string, number | null>;
+  /** Manual assignment: pair a photo with a row index, or null = un-pair. */
+  onAssignRow?: (filename: string, rowIndex: number | null) => void;
+  /** Undo one manual assignment (photo falls back to the auto strategy). */
+  onResetPair?: (filename: string) => void;
+  /** Undo every manual assignment at once. */
+  onResetAllPairs?: () => void;
 }
 
 const MAX_LISTED = 300;
@@ -48,22 +63,177 @@ function CellInput({
   );
 }
 
+/** 40px photo thumbnail — falls back to an icon while the URL loads. */
+function Thumb({ url, name }: { url?: string; name: string }) {
+  if (!url) {
+    return (
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-400">
+        <Icons.image className="h-4 w-4" />
+      </span>
+    );
+  }
+  return (
+    <img
+      src={url}
+      alt={name}
+      loading="lazy"
+      className="h-10 w-10 shrink-0 rounded-lg object-cover ring-1 ring-slate-200"
+    />
+  );
+}
+
 /**
- * Step 5 preview (PRDv2 §16): the sequential photo-to-timestamp mapping is
- * shown before processing — the safety net for positional mapping. The date
- * and time cells are editable so a wrong/invalid value can be replaced
- * without touching the spreadsheet.
+ * Row picker — the interactive heart of the mapping review. Lets the user
+ * choose exactly which spreadsheet row a photo takes its timestamp from.
+ */
+function RowPicker({
+  filename,
+  rowIndex,
+  allRows,
+  rowOwner,
+  isManual,
+  nameMode,
+  disabled,
+  onAssign,
+  onReset,
+}: {
+  filename: string;
+  /** Currently paired row index, or undefined when un-paired. */
+  rowIndex: number | undefined;
+  allRows: SpreadsheetRow[];
+  /** Which photo currently owns each row (for the "dipakai" hint). */
+  rowOwner: ReadonlyMap<number, string>;
+  isManual: boolean;
+  nameMode: boolean;
+  disabled?: boolean;
+  onAssign: (filename: string, rowIndex: number | null) => void;
+  onReset: (filename: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <select
+        aria-label={`Pilih baris data untuk ${filename}`}
+        value={rowIndex ?? -1}
+        disabled={disabled}
+        onChange={(event) => {
+          const value = Number(event.target.value);
+          onAssign(filename, value === -1 ? null : value);
+        }}
+        className={`max-w-[15rem] rounded-lg border px-2 py-1.5 text-xs shadow-sm transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400 ${
+          isManual
+            ? 'border-indigo-300 bg-indigo-50/70 text-indigo-800 focus:border-indigo-400 focus:ring-indigo-500/15'
+            : 'border-slate-200 bg-white text-slate-700 focus:border-indigo-400 focus:ring-indigo-500/15'
+        }`}
+      >
+        <option value={-1}>Tanpa jam — salin apa adanya</option>
+        {allRows.map((row, index) => {
+          const owner = rowOwner.get(index);
+          const usedByOther = owner !== undefined && owner !== filename;
+          const label = [
+            `Baris ${row.sheetRowNumber}`,
+            `${row.date || '—'} ${row.time || '—'}`,
+            nameMode && row.name ? row.name : '',
+          ]
+            .filter(Boolean)
+            .join(' · ');
+          return (
+            <option key={index} value={index}>
+              {label}
+              {usedByOther ? `  ← dipakai ${owner}` : ''}
+              {row.error || row.dateError ? '  ⚠' : ''}
+            </option>
+          );
+        })}
+      </select>
+      {isManual && (
+        <button
+          type="button"
+          title="Kembalikan ke pilihan otomatis"
+          disabled={disabled}
+          onClick={() => onReset(filename)}
+          className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Icons.refresh className="h-3.5 w-3.5" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Step 5 preview (PRDv2 §16), now interactive: every photo shows a thumbnail
+ * and a row picker so the user can override the auto pairing by hand. The
+ * date and time cells stay editable as before.
  */
 export function MappingPreview({
   mapping,
   formatId,
   onEditCell,
   editedRows,
+  nameMode = false,
   disabled,
+  allRows,
+  pairIndexes,
+  manualPairs,
+  onAssignRow,
+  onResetPair,
+  onResetAllPairs,
 }: MappingPreviewProps) {
   const { entries, extraPhotos, extraRows, counts } = mapping;
   const editable = !!onEditCell;
+  const interactive = !!(onAssignRow && onResetPair && allRows && pairIndexes);
   const editedCount = editedRows?.size ?? 0;
+  const manualCount = manualPairs?.size ?? 0;
+
+  /* Object URLs for the thumbnails. Memoized on a stable fingerprint of the
+     file set (name + lastModified + size), so cell edits and other
+     re-renders never recreate them; revoked whenever the set changes. */
+  const thumbnailFiles = useMemo(
+    () => [...entries.map((entry) => entry.file), ...extraPhotos],
+    [entries, extraPhotos],
+  );
+  const fileMapKey = useMemo(
+    () =>
+      thumbnailFiles.map((file) => `${file.name}\u0000${file.lastModified}\u0000${file.size}`).join('\u0001'),
+    [thumbnailFiles],
+  );
+  const previewUrls = useMemo(() => {
+    const urls = new Map<string, string>();
+    for (const file of thumbnailFiles) {
+      if (!urls.has(file.name)) urls.set(file.name, URL.createObjectURL(file));
+    }
+    return urls;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileMapKey]);
+  useEffect(() => {
+    return () => previewUrls.forEach((url) => URL.revokeObjectURL(url));
+  }, [previewUrls]);
+
+  /** Which photo currently owns each row index (for picker hints). */
+  const rowOwner = useMemo(() => {
+    const owner = new Map<number, string>();
+    if (!interactive) return owner;
+    for (const file of [...entries.map((entry) => entry.file), ...extraPhotos]) {
+      const rowIndex = pairIndexes?.get(file.name);
+      if (rowIndex !== undefined) owner.set(rowIndex, file.name);
+    }
+    return owner;
+  }, [interactive, entries, extraPhotos, pairIndexes]);
+
+  const renderPicker = (filename: string) =>
+    interactive ? (
+      <RowPicker
+        filename={filename}
+        rowIndex={pairIndexes?.get(filename)}
+        allRows={allRows ?? []}
+        rowOwner={rowOwner}
+        isManual={manualPairs?.has(filename) ?? false}
+        nameMode={nameMode}
+        disabled={disabled}
+        onAssign={onAssignRow!}
+        onReset={onResetPair!}
+      />
+    ) : null;
 
   return (
     <div className="space-y-5">
@@ -84,31 +254,56 @@ export function MappingPreview({
         />
       </div>
 
+      {interactive && (
+        <InfoBanner message="Pasangan bisa diatur manual: gunakan dropdown “Baris data” di setiap foto untuk memilih baris spreadsheet mana yang dipakai. Memilih baris yang sudah dipakai foto lain akan melepas pasangan foto tersebut. “Tanpa jam” menyalin foto apa adanya tanpa timestamp." />
+      )}
       {editable && (
         <InfoBanner message="Kolom Tanggal dan Jam bisa langsung diketik untuk mengganti nilai yang salah — perubahan hanya dipakai di aplikasi ini, spreadsheet asli tidak diubah. Format diterima: 20/05/2022, 20.05.2022, 14:09, 21.22." />
       )}
-      {editedCount > 0 && (
-        <Badge tone="sky">
-          <Icons.clipboard className="h-3 w-3" />
-          {editedCount} baris diedit manual
-        </Badge>
+
+      {(editedCount > 0 || manualCount > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {manualCount > 0 && (
+            <>
+              <Badge tone="indigo">
+                <Icons.settings className="h-3 w-3" />
+                {manualCount} pasangan diatur manual
+              </Badge>
+              <Button variant="ghost" disabled={disabled} onClick={onResetAllPairs}>
+                <Icons.refresh className="h-3.5 w-3.5" />
+                Reset semua ke otomatis
+              </Button>
+            </>
+          )}
+          {editedCount > 0 && (
+            <Badge tone="sky">
+              <Icons.clipboard className="h-3 w-3" />
+              {editedCount} baris diedit manual
+            </Badge>
+          )}
+        </div>
       )}
 
       {extraPhotos.length > 0 && (
         <WarningBanner title={`${extraPhotos.length} foto tidak punya pasangan jam — tetap ikut tersimpan`}>
           <p>
-            Data spreadsheet hanya cukup untuk {counts.mapped} foto. Sisanya tidak dibuang:
-            file asli <strong>disalin apa adanya</strong> (tanpa crop & tanpa timestamp) ke
-            subfolder <strong>“Tanpa jam”</strong> di dalam folder hasil.
+            {nameMode
+              ? 'Nama file foto-foto ini tidak ditemukan (atau ganda) di kolom nama spreadsheet. File asli '
+              : `Data spreadsheet hanya cukup untuk ${counts.mapped} foto. Sisanya `}
+            {nameMode ? '' : 'tidak dibuang: file asli '}
+            <strong>disalin apa adanya</strong> (tanpa crop & tanpa timestamp) ke subfolder{' '}
+            <strong>“Tanpa jam”</strong> di dalam folder hasil.
+            {interactive && ' Anda juga bisa langsung memilihkan baris untuk mereka lewat dropdown di bawah.'}
           </p>
         </WarningBanner>
       )}
 
       {extraRows.length > 0 && (
-        <WarningBanner title={`${extraRows.length} spreadsheet row(s) have no photo`}>
+        <WarningBanner title={`${extraRows.length} baris spreadsheet tidak punya foto`}>
           <p>
-            The extra rows are ignored — only the first {counts.photos} row(s) are mapped. Adjust
-            the start row if this is not what you expected.
+            {nameMode
+              ? 'Tidak ada foto dengan nama file yang cocok dengan baris-baris ini (atau namanya duplikat). Baris diabaikan — tidak ada timestamp yang ditebak.'
+              : `Baris ekstra diabaikan — hanya ${counts.photos} foto pertama yang dipasangkan otomatis. Anda tetap bisa memasangnya manual lewat dropdown “Baris data”.`}
           </p>
         </WarningBanner>
       )}
@@ -119,28 +314,44 @@ export function MappingPreview({
             Processing preview ({entries.length})
           </p>
           <TableShell
-            headers={['Photo', 'Baris', 'Tanggal', 'Jam', 'Timestamp preview', 'Status']}
+            headers={
+              nameMode
+                ? ['Photo', 'Nama di sheet', 'Baris data', 'Tanggal', 'Jam', 'Preview', 'Status']
+                : ['Photo', 'Baris data', 'Tanggal', 'Jam', 'Preview', 'Status']
+            }
           >
             {entries.slice(0, MAX_LISTED).map((entry, index) => {
               const row = entry.row;
               const dateValid = parseDateCell(row.date) !== null;
               const timeValid = parseTimeCell(row.time) !== null;
               const isEdited = editedRows?.has(row.sheetRowNumber) ?? false;
+              const isManual = manualPairs?.has(entry.filename) ?? false;
               return (
                 <tr key={`${entry.filename}-${index}`} className="bg-white hover:bg-slate-50">
-                  <td className="px-4 py-2 font-medium text-slate-800">
-                    <span className="block max-w-[240px] truncate">{entry.filename}</span>
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-3">
+                      <Thumb url={previewUrls.get(entry.filename)} name={entry.filename} />
+                      <span className="block max-w-[200px] truncate font-medium text-slate-800">
+                        {entry.filename}
+                      </span>
+                    </div>
                   </td>
-                  <td className="px-4 py-2 text-xs text-slate-400 tabular-nums">
-                    <span className="inline-flex items-center gap-1">
-                      {row.sheetRowNumber}
-                      {isEdited && (
-                        <span
-                          title="Diedit manual"
-                          className="h-1.5 w-1.5 rounded-full bg-sky-500"
-                        />
-                      )}
-                    </span>
+                  {nameMode && (
+                    <td className="px-4 py-2">
+                      <span className="block max-w-[160px] truncate font-mono text-xs text-emerald-700">
+                        {row.name && row.name !== '' ? row.name : '(kosong)'}
+                      </span>
+                    </td>
+                  )}
+                  <td className="px-4 py-2">
+                    <div className="flex flex-col gap-1">
+                      {renderPicker(entry.filename)}
+                      <span className="text-[10px] tabular-nums text-slate-400">
+                        Baris {row.sheetRowNumber}
+                        {isEdited && ' · diedit'}
+                        {isManual && ' · manual'}
+                      </span>
+                    </div>
                   </td>
                   <td className="px-4 py-2">
                     {editable ? (
@@ -222,12 +433,21 @@ export function MappingPreview({
           <p className="text-xs font-semibold uppercase tracking-wide text-amber-600">
             Photos without a spreadsheet row ({extraPhotos.length})
           </p>
-          <TableShell headers={['Photo', 'What happens']} maxHeight="max-h-48">
+          <TableShell
+            headers={interactive ? ['Photo', 'Baris data', 'What happens'] : ['Photo', 'What happens']}
+            maxHeight="max-h-64"
+          >
             {extraPhotos.slice(0, MAX_LISTED).map((file, index) => (
               <tr key={`${file.name}-${index}`} className="bg-white hover:bg-amber-50/40">
-                <td className="px-4 py-2 font-medium text-slate-800">
-                  <span className="block max-w-[280px] truncate">{file.name}</span>
+                <td className="px-4 py-2">
+                  <div className="flex items-center gap-3">
+                    <Thumb url={previewUrls.get(file.name)} name={file.name} />
+                    <span className="block max-w-[220px] truncate font-medium text-slate-800">
+                      {file.name}
+                    </span>
+                  </div>
                 </td>
+                {interactive && <td className="px-4 py-2">{renderPicker(file.name)}</td>}
                 <td className="px-4 py-2">
                   <Badge tone="amber">
                     <Icons.download className="h-3 w-3" />

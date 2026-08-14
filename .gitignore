@@ -22,3 +22,14 @@ npm-debug.log*
 # Internal requirement docs (not for the public repo)
 PRD.md
 PRDv2.md
+
+# User data — never commit photos, exports, or spreadsheet dumps
+*.zip
+*.csv
+Hasil/
+tmp_photos/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.heic
