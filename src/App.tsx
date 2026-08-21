@@ -15,15 +15,21 @@
 import { useMemo, useRef, useState, useEffect } from 'react';
 import type { ImportedSheet, RowSelection } from './types/spreadsheet';
 import { EMPTY_SELECTION } from './types/spreadsheet';
-import type { BatchOutput, BatchProgress, CropTemplate, TimestampPosition } from './types/processing';
+import type {
+  BatchOutput,
+  BatchProgress,
+  BatchResult,
+  CropTemplate,
+  TimestampPosition,
+} from './types/processing';
 import {
-  FilesystemError,
   PickerCancelledError,
   createSubfolder,
   pickInputFolder,
   pickOutputParent,
   supportsFolderAccess,
   type FolderSelection,
+  type OutputFolder,
 } from './services/filesystem';
 import { loadSpreadsheet } from './services/spreadsheet';
 import { parseDelimitedText } from './services/spreadsheet/csvParser';
@@ -38,8 +44,8 @@ import {
   type RowOverrides,
 } from './services/spreadsheet/parse';
 import { applyManualPairs, buildAutoPairs, mappingFromPairs } from './services/mapping';
-import { processBatch } from './services/batchProcessor';
-import { DEFAULT_FORMAT_ID, formatTimestamp, parseDateCell, parseTimeCell } from './utils/dateFormatter';
+import { expandLocationsForBatch } from './services/batchProcessor';
+import { DEFAULT_FORMAT_ID, parseDateCell, parseTimeCell } from './utils/dateFormatter';
 import { sortPhotosByFilename } from './utils/imageOrdering';
 import { Button, ErrorBanner, Guide, Icons, Tilt3D } from './components/ui';
 import { Background3D } from './components/Background3D/Background3D';
@@ -48,10 +54,7 @@ import { SpreadsheetUrlInput } from './components/SpreadsheetUrlInput/Spreadshee
 import { ColumnSelector } from './components/ColumnSelector/ColumnSelector';
 import { CropEditor } from './components/CropEditor/CropEditor';
 import { TimestampInput } from './components/TimestampInput/TimestampInput';
-import { MappingPreview } from './components/MappingPreview/MappingPreview';
-import { ProcessingProgress } from './components/ProcessingProgress/ProcessingProgress';
 import { ResultPanel } from './components/ResultPanel/ResultPanel';
-import { QuickMode } from './components/QuickMode/QuickMode';
 import { LocationInput } from './components/LocationInput/LocationInput';
 import { PositionPicker } from './components/PositionPicker/PositionPicker';
 import type { LocationData } from './components/LocationInput/LocationInput';
@@ -60,6 +63,7 @@ import type { Address, Location, ZoneAddressEntry, ZoneFeaturePool } from './typ
 import { getLocationManager } from './services/locationManager';
 import { detectZoneFeatures } from './services/geocoder/overpass';
 import type { OverpassZoneFeature } from './services/geocoder/overpass';
+import { ReviewStation } from './components/ReviewStation/ReviewStation';
 
 const STEPS = [
   {
@@ -93,9 +97,9 @@ const STEPS = [
     icon: Icons.database,
   },
   {
-    title: 'Proses',
-    subtitle: 'Jalankan batch ke folder output',
-    icon: Icons.refresh,
+    title: 'Review',
+    subtitle: 'Cek tiap foto satu-satu — approve, edit, skip, atau tandai sebagai unsure',
+    icon: Icons.eye,
   },
   {
     title: 'Hasil',
@@ -277,9 +281,6 @@ function PageHeading({
 
 export default function App() {
   const [step, setStep] = useState<StepIndex>(0);
-  /** Workflow mode: the full seven steps, or the dedicated quick tabs. */
-  const [mode, setMode] = useState<'lengkap' | 'cepat'>('lengkap');
-
   // Step 1 — spreadsheet (the time list)
   const [sheetUrl, setSheetUrl] = useState('');
   const [sheetLoading, setSheetLoading] = useState(false);
@@ -381,11 +382,12 @@ export default function App() {
     return mappingFromPairs(photos, extracted.rows, finalPairs);
   }, [photos, extracted, autoPairs, finalPairs]);
 
-  /** Row numbers the user has manually edited in the preview. */
-  const editedRowNumbers = useMemo(
-    () => new Set(Object.keys(overrides).map(Number)),
-    [overrides],
-  );
+  /** Selected location zones expanded into one address per photo. */
+  const expandedLocations = useMemo(() => {
+    const selected = locations.filter((location) => selectedLocationIds.has(location.id));
+    if (selected.length === 0) return [];
+    return expandLocationsForBatch(selected, photos.length);
+  }, [locations, selectedLocationIds, photos.length]);
 
   /* ------------------------- step 1: spreadsheet ------------------------- */
 
@@ -474,22 +476,6 @@ export default function App() {
     setOutput(null); // the previous run no longer reflects this mapping
   };
 
-  /** Undo one manual assignment — the photo falls back to the auto strategy. */
-  const handleResetPair = (filename: string) => {
-    setManualPairs((prev) => {
-      if (!prev.has(filename)) return prev;
-      const next = new Map(prev);
-      next.delete(filename);
-      return next;
-    });
-    setOutput(null);
-  };
-
-  /** Undo every manual assignment at once. */
-  const handleResetAllPairs = () => {
-    setManualPairs(new Map());
-    setOutput(null);
-  };
   /* --------------------------- step 2: photos ---------------------------- */
 
   const handlePickFolder = async () => {
@@ -506,63 +492,63 @@ export default function App() {
     }
   };
 
-  /* ----------------------------- step 6: run ----------------------------- */
+  /* ----------------------------- step 6: review ----------------------------- */
 
-  const canProcess =
-    !!folder &&
-    photos.length > 0 &&
-    !!mapping &&
-    mapping.entries.length > 0 &&
-    dateReady &&
-    timeReady &&
-    (selection.matchMode === 'sequential' || selection.nameColumn !== null) &&
-    !progress;
+  const [outputFolder, setOutputFolder] = useState<OutputFolder | null>(null);
+  /** Results accumulated as each photo is approved and processed. */
+  const [reviewResults, setReviewResults] = useState<BatchResult[]>([]);
 
-  const handleProcess = async () => {
-    if (!canProcess || !mapping) return;
-    setBatchError(null);
-
-    let outputFolder;
+  const handlePickOutputFolder = async (): Promise<OutputFolder | null> => {
     try {
       const parent = await pickOutputParent();
-      outputFolder = await createSubfolder(parent, `Processed ${runStamp()}`);
+      const folder = await createSubfolder(parent, `Processed ${runStamp()}`);
+      setOutputFolder(folder);
+      return folder;
     } catch (error) {
-      if (error instanceof PickerCancelledError) return;
+      if (error instanceof PickerCancelledError) return null;
       setBatchError(
         error instanceof Error ? error.message : 'Unable to prepare the output folder.',
       );
-      return;
+      return null;
     }
+  };
 
-    const runId = ++runIdRef.current;
-    setProgress({ total: mapping.entries.length + mapping.extraPhotos.length, processed: 0 });
-    const selectedLocations = locations.filter((location) => selectedLocationIds.has(location.id));
-    try {
-      const result = await processBatch(mapping.entries, {
-        crop: template,
-        formatId,
-        position,
-        outputFolder,
-        extraPhotos: mapping.extraPhotos,
-        locations: selectedLocations,
-        locationEnabled: selectedLocations.length > 0,
-        locationPosition,
-        onProgress: (p) => {
-          if (runIdRef.current === runId) setProgress(p);
-        },
-      });
-      if (runIdRef.current !== runId) return;
-       setOutput(result);
-       setProgress(null);
-       setStep(7);
-    } catch (error) {
-      setProgress(null);
-      setBatchError(
-        error instanceof FilesystemError
-          ? error.message
-          : 'Processing stopped unexpectedly — completed photos were already saved.',
-      );
+  const handleProcessed = (filename: string, result: BatchResult) => {
+    setReviewResults((prev) => [...prev, result]);
+    if (result.status !== 'success') {
+      setBatchError(`Foto ${filename}: ${result.error ?? 'pemrosesan gagal.'}`);
     }
+  };
+
+  const handleReviewSkip = (filename: string) => {
+    setReviewResults((prev) => [
+      ...prev,
+      { filename, status: 'failed', error: 'Dilewati saat review.' },
+    ]);
+  };
+
+  const handleReviewUnsure = (filename: string) => {
+    setReviewResults((prev) => [
+      ...prev,
+      { filename, status: 'failed', error: 'Ditandai unsure — belum diproses.' },
+    ]);
+  };
+
+  /** Review finished — build the summary and move to the results step. */
+  const handleReviewComplete = (summary: { approved: number; skipped: number; unsure: number; failed: number }) => {
+    const results = reviewResults;
+    setOutput({
+      results,
+      summary: {
+        total: results.length,
+        successful: summary.approved,
+        failed: summary.failed,
+        copied: 0,
+        skipped: summary.skipped,
+        unsure: summary.unsure,
+      },
+      outputFolderName: outputFolder?.name ?? '—',
+    });
   };
 
   const reset = () => {
@@ -580,6 +566,8 @@ export default function App() {
     setManualPairs(new Map());
     setProgress(null);
     setOutput(null);
+    setOutputFolder(null);
+    setReviewResults([]);
     setBatchError(null);
     setSheetError(null);
     setFolderError(null);
@@ -724,7 +712,7 @@ export default function App() {
       case 5:
         return timeReady && !!mapping && mapping.entries.length > 0;
       case 6:
-        return !!output;
+        return photos.length > 0 && !!extracted?.rows && !!autoPairs;
       default:
         return false;
     }
@@ -737,73 +725,9 @@ export default function App() {
   const progressPercent = Math.round((completedCount / STEPS.length) * 100);
   const activeMeta = STEPS[step];
 
-  const sheetHeaders = sheet ? rowHeaders(sheet, selection.headerRow) : [];
-  const dateColumnLabel =
-    selection.dateColumn !== null
-      ? sheetHeaders[selection.dateColumn] || `Column ${selection.dateColumn + 1}`
-      : null;
-  const timeColumnLabel =
-    selection.timeColumn !== null
-      ? sheetHeaders[selection.timeColumn] || `Column ${selection.timeColumn + 1}`
-      : null;
 
-  const modeSwitch = (
-    <div
-      className="inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1"
-      role="tablist"
-      aria-label="Mode workflow"
-    >
-      {(
-        [
-          { id: 'lengkap', label: 'Mode Lengkap' },
-          { id: 'cepat', label: 'Mode Cepat' },
-        ] as const
-      ).map((option) => (
-        <button
-          key={option.id}
-          type="button"
-          role="tab"
-          aria-selected={mode === option.id}
-          onClick={() => setMode(option.id)}
-          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
-            mode === option.id
-              ? 'bg-white text-slate-900 shadow-sm'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  );
 
-  /* Mode Cepat — dedicated simple tabs, no spreadsheet needed. */
-  if (mode === 'cepat') {
-    return (
-      <div className="min-h-screen">
-        <Background3D />
-        <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/80 backdrop-blur-md">
-          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-            <Brand compact />
-            {modeSwitch}
-          </div>
-        </header>
-        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-6">
-          <div className="space-y-6">
-            <PageHeading
-              icon={Icons.sparkles}
-              title="Mode Cepat"
-              description="Alur ringkas tanpa spreadsheet: atur jam → upload foto → proses (batch/manual) → save."
-            />
-            <QuickMode />
-          </div>
-        </main>
-        <footer className="mx-auto w-full max-w-5xl px-4 pb-8 text-center text-xs text-slate-400 sm:px-6">
-          Semua pemrosesan berjalan lokal di browser Anda — foto asli tidak pernah diubah.
-        </footer>
-      </div>
-    );
-  }
+
 
   return (
     <div className="min-h-screen">
@@ -882,31 +806,30 @@ export default function App() {
       {/* ------------------------------ main -------------------------------- */}
       <div className="flex min-h-screen flex-col lg:pl-72">
         <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/80 backdrop-blur-md">
-          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
-            <div className="flex items-center gap-3 lg:hidden">
-              <Brand compact />
-            </div>
-            <div className="hidden items-center gap-2 lg:flex">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Langkah {step + 1} dari {STEPS.length}
-              </span>
-              <span className="text-slate-300">/</span>
-              <span className="text-sm font-bold tracking-tight text-slate-900">
-                {activeMeta.title}
-              </span>
-            </div>
-            <div className="flex items-center gap-3">
-              {modeSwitch}
-              <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold tabular-nums text-slate-500 sm:block">
-                {progressPercent}% selesai
-              </span>
-              {photos.length > 0 && (
-                <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold tabular-nums text-indigo-600 ring-1 ring-inset ring-indigo-200/60">
-                  {photos.length} foto
-                </span>
-              )}
-            </div>
-          </div>
+    <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+      <div className="flex items-center gap-3 lg:hidden">
+        <Brand compact />
+      </div>
+      <div className="hidden items-center gap-2 lg:flex">
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+          Langkah {step + 1} dari {STEPS.length}
+        </span>
+        <span className="text-slate-300">/</span>
+        <span className="text-sm font-bold tracking-tight text-slate-900">
+          {activeMeta.title}
+        </span>
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="hidden rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold tabular-nums text-slate-500 sm:block">
+          {progressPercent}% selesai
+        </span>
+        {photos.length > 0 && (
+          <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold tabular-nums text-indigo-600 ring-1 ring-inset ring-indigo-200/60">
+            {photos.length} foto
+          </span>
+        )}
+      </div>
+    </div>
 
           {/* mobile step pills */}
           <div className="border-t border-slate-100 px-4 py-2 lg:hidden">
@@ -1201,277 +1124,180 @@ export default function App() {
               </>
             )}
 
-            {step === 5 && (
-              <>
-                <Guide
-                  steps={[
-                    'Pilih worksheet (gid) jika data bukan di tab pertama.',
-                    'Atur baris header dan baris awal data bila terdeteksi salah.',
-                    'Pilih sumber jam: kolom spreadsheet (satu jam per baris) atau satu jam manual untuk semua foto.',
-                    'Pilih cara memasangkan foto ↔ baris: berurutan, atau berdasarkan nama file ↔ kolom nama.',
-                    'Periksa tabel pasangan foto ↔ timestamp di bawah sebelum lanjut.',
-                  ]}
-                />
-                {sheet ? (
-                  <>
-                    <ColumnSelector
-                      sheet={sheet}
-                      config={selection}
-                      onConfig={setSelection}
-                      gidSelection={gidSelection}
-                      onWorksheet={handleWorksheet}
-                      loadingWorksheet={worksheetLoading}
-                      manualTime={timeInput}
-                      onManualTime={setTimeInput}
-                      disabled={!!progress}
-                    />
-                    {sheetError && <ErrorBanner message={sheetError} />}
-                    {mapping && (
-                      <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-sm shadow-slate-900/5">
-                        <h2 className="text-sm font-semibold tracking-tight text-slate-900">
-                          Review mapping sebelum proses
-                        </h2>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {selection.matchMode === 'byName'
-                            ? 'Nama file foto dicocokkan dengan kolom nama dari spreadsheet. Periksa pasangan di bawah sebelum menjalankan proses.'
-                            : 'Foto diurutkan berdasarkan nama file lalu dipasangkan berurutan dengan list timestamp. Periksa pasangan di bawah sebelum menjalankan proses.'}
-                        </p>
-                        <div className="mt-5">
-                          <MappingPreview
-                            mapping={mapping}
-                            formatId={formatId}
-                            onEditCell={handleEditCell}
-                            editedRows={editedRowNumbers}
-                            nameMode={selection.matchMode === 'byName'}
-                            disabled={!!progress}
-                            allRows={extracted?.rows ?? []}
-                            pairIndexes={finalPairs}
-                            manualPairs={manualPairs}
-                            onAssignRow={handleAssignRow}
-                            onResetPair={handleResetPair}
-                            onResetAllPairs={handleResetAllPairs}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </>
-                ) : selection.timeSource === 'manual' ? (
-                  <ColumnSelector
-                    sheet={sheet}
-                    config={selection}
-                    onConfig={setSelection}
-                    gidSelection={gidSelection}
-                    onWorksheet={handleWorksheet}
-                    loadingWorksheet={worksheetLoading}
-                    manualTime={timeInput}
-                    onManualTime={setTimeInput}
-                    disabled={!!progress}
-                  />
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
-                    <Icons.database className="mx-auto h-8 w-8 text-slate-300" />
-                    <p className="mt-3 text-sm font-semibold text-slate-700">
-                      Spreadsheet belum dimuat
+{step === 5 && (
+        <>
+          <Guide
+            steps={[
+              'Pilih worksheet (gid) jika data bukan di tab pertama.',
+              'Atur baris header dan baris awal data bila terdeteksi salah.',
+              'Pilih sumber jam: kolom spreadsheet (satu jam per baris) atau satu jam manual untuk semua foto.',
+              'Pilih cara memasangkan foto ↔ baris: berurutan, atau berdasarkan nama file ↔ kolom nama.',
+              'Periksa tabel pasangan foto ↔ timestamp di bawah sebelum lanjut.',
+            ]}
+          />
+          {sheet ? (
+            <>
+              <ColumnSelector
+                sheet={sheet}
+                config={selection}
+                onConfig={setSelection}
+                gidSelection={gidSelection}
+                onWorksheet={handleWorksheet}
+                loadingWorksheet={worksheetLoading}
+                manualTime={timeInput}
+                onManualTime={setTimeInput}
+                disabled={!!progress}
+              />
+              {sheetError && <ErrorBanner message={sheetError} />}
+              {mapping && mapping.entries.length > 0 && (
+                <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm shadow-slate-900/5">
+                  <Icons.check className="h-5 w-5 text-emerald-500" />
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">
+                      {mapping.entries.length} pasangan foto ↔ jam siap
                     </p>
-                    <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
-                      Muat dulu spreadsheet di langkah 1 untuk memilih kolom jam. Kamu tetap bisa
-                      mengatur langkah lain sambil menunggu.
-                    </p>
-                    <Button variant="secondary" className="mt-4" onClick={() => setStep(0)}>
-                      <Icons.link className="h-4 w-4" />
-                      Ke langkah List Jam
-                    </Button>
-                  </div>
-                )}
-                <div className="flex justify-between">
-                  <Button variant="secondary" onClick={() => setStep(4)}>
-                    <Icons.arrowLeft className="h-4 w-4" />
-                    Kembali
-                  </Button>
-                  <Button onClick={() => setStep(6)}>
-                    Lanjut ke proses
-                    <Icons.arrowRight className="h-4 w-4" />
-                  </Button>
-                </div>
-              </>
-            )}
-
-            {step === 6 && (
-              <>
-                <Guide
-                  steps={[
-                    'Periksa checklist kesiapan — item yang kurang bisa langsung diklik untuk dilengkapi.',
-                    'Klik tombol proses lalu pilih folder tujuan.',
-                    'Aplikasi membuat subfolder "Processed …" dan menyimpan hasil di sana.',
-                    'Foto tanpa pasangan jam ikut tersimpan apa adanya di subfolder "Tanpa jam".',
-                    'Pantau progres secara langsung; hasil akhir tampil di langkah 7.',
-                  ]}
-                />
-
-                <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm shadow-slate-900/5">
-                  <div className="border-b border-slate-100 bg-gradient-to-r from-indigo-50/60 via-violet-50/60 to-transparent px-6 py-4">
-                    <h2 className="text-sm font-semibold tracking-tight text-slate-900">
-                      Kesiapan batch
-                    </h2>
-                    <p className="mt-0.5 text-xs text-slate-500">
-                      {missing.length === 0
-                        ? 'Semua siap — klik tombol proses di bawah.'
-                        : `${missing.length} hal masih perlu dilengkapi. Klik item untuk melengkapinya.`}
+                    <p className="text-xs text-slate-500">
+                      Pasangan lengkap bisa diperiksa dan diubah per-foto di langkah Review berikutnya.
                     </p>
                   </div>
-                  <ul className="divide-y divide-slate-100 px-6 py-1 text-sm">
-                    {missing.map((item) => (
-                      <li
-                        key={item.label}
-                        className="flex items-center justify-between gap-3 py-2.5"
-                      >
-                        <span className="flex items-center gap-2 text-slate-600">
-                          <Icons.alert className="h-4 w-4 shrink-0 text-amber-500" />
-                          {item.label}
-                        </span>
-                        <Button
-                          variant="secondary"
-                          className="px-3 py-1.5 text-xs"
-                          onClick={() => setStep(item.step)}
-                        >
-                          Buka langkah {item.step + 1}
-                          <Icons.arrowRight className="h-3.5 w-3.5" />
-                        </Button>
-                      </li>
-                    ))}
-                    {missing.length === 0 && mapping && (
-                      <li className="flex items-center gap-2 py-2.5 font-medium text-emerald-700">
-                        <Icons.check className="h-4 w-4 shrink-0" />
-                        <span>
-                          {mapping.entries.length} foto siap diproses dengan timestamp.
-                          {mapping.extraPhotos.length > 0 && (
-                            <span className="font-normal text-slate-500">
-                              {' '}+ {mapping.extraPhotos.length} foto tanpa jam akan disalin apa
-                              adanya ke subfolder "Tanpa jam".
-                            </span>
-                          )}
-                        </span>
-                      </li>
-                    )}
-                  </ul>
-
-                  {mapping && mapping.entries.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 px-6 py-4 text-xs">
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-50 px-3 py-1.5 font-semibold text-violet-700 ring-1 ring-inset ring-violet-200/60">
-                        <Icons.clipboard className="h-3.5 w-3.5" />
-                        Tanggal:{' '}
-                        {selection.dateSource === 'manual'
-                          ? dateValid
-                            ? formatTimestamp(dateInput.trim(), '00:00', formatId).replace(
-                                ' 00:00',
-                                '',
-                              )
-                            : '-'
-                          : dateColumnLabel
-                            ? `kolom "${dateColumnLabel}"`
-                            : '-'}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-3 py-1.5 font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200/60">
-                        <Icons.clipboard className="h-3.5 w-3.5" />
-                        Jam:{' '}
-                        {selection.timeSource === 'manual'
-                          ? timeValid
-                            ? timeInput.trim()
-                            : '-'
-                          : timeColumnLabel
-                            ? `kolom "${timeColumnLabel}"`
-                            : '-'}
-                      </span>
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 font-semibold text-slate-600 ring-1 ring-inset ring-slate-200/60">
-                        <Icons.image className="h-3.5 w-3.5" />
-                        {mapping.entries.length} foto siap
-                      </span>
-                      {mapping.counts.invalidRows > 0 && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1.5 font-semibold text-red-700 ring-1 ring-inset ring-red-200/60">
-                          <Icons.alert className="h-3.5 w-3.5" />
-                          {mapping.counts.invalidRows} baris jam invalid akan gagal
-                        </span>
-                      )}
-                      {mapping.extraPhotos.length > 0 && (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-3 py-1.5 font-semibold text-amber-700 ring-1 ring-inset ring-amber-200/60">
-                          <Icons.download className="h-3.5 w-3.5" />
-                          {mapping.extraPhotos.length} foto tanpa jam → disalin ke "Tanpa jam"
-                        </span>
-                      )}
-                    </div>
-                  )}
                 </div>
+              )}
+            </>
+          ) : selection.timeSource === 'manual' ? (
+            <ColumnSelector
+              sheet={sheet}
+              config={selection}
+              onConfig={setSelection}
+              gidSelection={gidSelection}
+              onWorksheet={handleWorksheet}
+              loadingWorksheet={worksheetLoading}
+              manualTime={timeInput}
+              onManualTime={setTimeInput}
+              disabled={!!progress}
+            />
+          ) : (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
+              <Icons.database className="mx-auto h-8 w-8 text-slate-300" />
+              <p className="mt-3 text-sm font-semibold text-slate-700">
+                Spreadsheet belum dimuat
+              </p>
+              <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
+                Muat dulu spreadsheet di langkah 1 untuk memilih kolom jam. Kamu tetap bisa
+                mengatur langkah lain sambil menunggu.
+              </p>
+              <Button variant="secondary" className="mt-4" onClick={() => setStep(0)}>
+                <Icons.link className="h-4 w-4" />
+                Ke langkah List Jam
+              </Button>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <Button variant="secondary" onClick={() => setStep(4)}>
+              <Icons.arrowLeft className="h-4 w-4" />
+              Kembali
+            </Button>
+            <Button onClick={() => setStep(6)}>
+              Lanjut ke review
+              <Icons.arrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </>
+      )}
 
-                {progress && <ProcessingProgress progress={progress} />}
-                {batchError && <ErrorBanner message={batchError} />}
+{step === 6 && (
+        <>
+          <Guide
+            steps={[
+              'Cek tiap foto satu-satu — approve, edit, skip, atau tandai sebagai unsure.',
+              'Gunakan keyboard shortcuts: ← → prev/next, Enter approve, S skip, R unsure.',
+              'Setiap foto yang di-approve akan segera diproses dan disimpan ke folder output.',
+              'Edit tanggal/jam atau ganti pasangan baris spreadsheet jika diperlukan.',
+              'Atur crop per-foto dan overlay lokasi sesuai kebutuhan.',
+            ]}
+          />
 
-                <div className="flex justify-between">
-                  <Button variant="secondary" onClick={() => setStep(5)} disabled={!!progress}>
-                    <Icons.arrowLeft className="h-4 w-4" />
-                    Kembali
-                  </Button>
-                  <Button onClick={handleProcess} disabled={!canProcess}>
-                    {progress ? (
-                      <>
-                        <Icons.refresh className="h-4 w-4 animate-spin" />
-                        Memproses…
-                      </>
-                    ) : (
-                      <>
-                        <Icons.download className="h-4 w-4" />
-                        {missing.length === 0 && mapping
-                          ? `Pilih folder output & proses ${mapping.entries.length} foto`
-                          : 'Proses batch'}
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </>
-            )}
+          {batchError && <ErrorBanner message={batchError} />}
 
-            {step === 7 && (
-              <>
-                <Guide
-                  steps={[
-                    'Lihat ringkasan: total, sukses, dan gagal beserta alasannya.',
-                    'File hasil ada di subfolder "Processed …" yang tadi dibuat.',
-                    'Klik "Mulai batch baru" untuk mengosongkan semua dan mulai lagi.',
-                  ]}
-                />
-                {output ? (
-                  <>
-                    <ResultPanel output={output} />
-                    <div className="flex justify-between">
-                      <Button variant="secondary" onClick={() => setStep(6)}>
-                        <Icons.arrowLeft className="h-4 w-4" />
-                        Kembali ke proses
-                      </Button>
-                      <Button onClick={reset}>
-                        <Icons.refresh className="h-4 w-4" />
-                        Mulai batch baru
-                      </Button>
-                    </div>
-                  </>
-                ) : (
-                  <Tilt3D maxTilt={3} glare={false}>
-                    <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
-                      <Icons.file className="anim-float mx-auto h-8 w-8 text-slate-300" />
-                      <p className="mt-3 text-sm font-semibold text-slate-700">
-                        Belum ada hasil batch
-                      </p>
-                      <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
-                        Jalankan proses dulu di langkah 7. Setelah selesai, ringkasan hasil akan
-                        tampil di sini.
-                      </p>
-                      <Button variant="secondary" className="mt-4" onClick={() => setStep(6)}>
-                        <Icons.refresh className="h-4 w-4" />
-                        Ke langkah Proses
-                      </Button>
-                    </div>
-                  </Tilt3D>
-                )}
-              </>
-            )}
+          {/* Review Station */}
+          {photos.length > 0 && extracted?.rows && autoPairs && (
+            <ReviewStation
+              photos={photos}
+              rows={extracted.rows}
+              pairIndexes={finalPairs}
+              formatId={formatId}
+              defaultCrop={template}
+              position={position}
+              locationPosition={locationPosition}
+              locations={expandedLocations}
+              locationEnabled={expandedLocations.length > 0}
+              onEditCell={handleEditCell}
+              onAssignRow={handleAssignRow}
+              onPickOutputFolder={handlePickOutputFolder}
+              outputFolder={outputFolder}
+              onProcessed={handleProcessed}
+              onSkip={handleReviewSkip}
+              onUnsure={handleReviewUnsure}
+              onComplete={handleReviewComplete}
+            />
+          )}
+          
+          {!photos.length || !extracted?.rows || !autoPairs && (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
+              <Icons.database className="mx-auto h-8 w-8 text-slate-300" />
+              <p className="mt-3 text-sm font-semibold text-slate-700">
+                Belum siap untuk review
+              </p>
+              <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
+                Pastikan Anda telah memuat spreadsheet, memilih folder foto, dan mengatur kolom tanggal/jam.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+{step === 7 && (
+        <>
+          <Guide
+            steps={[
+              'Lihat ringkasan: total, sukses, dan gagal beserta alasannya.',
+              'File hasil ada di subfolder "Processed …" yang tadi dibuat.',
+              'Klik "Mulai batch baru" untuk mengosongkan semua dan mulai lagi.',
+            ]}
+          />
+          {output ? (
+            <>
+              <ResultPanel output={output} />
+              <div className="flex justify-between">
+                <Button variant="secondary" onClick={() => setStep(6)}>
+                  <Icons.arrowLeft className="h-4 w-4" />
+                  Kembali ke review
+                </Button>
+                <Button onClick={reset}>
+                  <Icons.refresh className="h-4 w-4" />
+                  Mulai batch baru
+                </Button>
+              </div>
+            </>
+          ) : (
+            <Tilt3D maxTilt={3} glare={false}>
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white/60 p-10 text-center">
+                <Icons.file className="anim-float mx-auto h-8 w-8 text-slate-300" />
+                <p className="mt-3 text-sm font-semibold text-slate-700">
+                  Belum ada hasil batch
+                </p>
+                <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
+                  Jalankan proses dulu di langkah 7. Setelah selesai, ringkasan hasil akan
+                  tampil di sini.
+                </p>
+                <Button variant="secondary" className="mt-4" onClick={() => setStep(6)}>
+                  <Icons.refresh className="h-4 w-4" />
+                  Ke langkah Review
+                </Button>
+              </div>
+            </Tilt3D>
+          )}
+        </>
+      )}
 
 
             </div>

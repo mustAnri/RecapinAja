@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { CropTemplate, TimestampPosition } from '../../types/processing';
 import { Badge, Button, Card, ErrorBanner, Field, Icons, InfoBanner, inputClasses } from '../ui';
+import { CropBox } from '../CropBox/CropBox';
 
 interface CropEditorProps {
   /** Sorted photos — the user picks one as the preview (§17). */
@@ -28,9 +28,10 @@ interface CropRect {
   side: number;
 }
 
-const MIN_SIDE_PX = 32;
-/** Biggest displayed side of the preview, so huge photos stay usable. */
-const MAX_PREVIEW_SIDE = 480;
+function centerCrop(photo: LoadedPhoto): CropRect {
+  const side = Math.max(MIN_SIDE_PX, Math.min(photo.width, photo.height));
+  return { x: Math.round((photo.width - side) / 2), y: Math.round((photo.height - side) / 2), side };
+}
 
 /** The selectable anchors for the timestamp overlay. */
 const POSITION_CHOICES: Array<{ id: TimestampPosition; label: string; short: string }> = [
@@ -42,24 +43,7 @@ const POSITION_CHOICES: Array<{ id: TimestampPosition; label: string; short: str
   { id: 'bottom-right', label: 'Kanan bawah', short: '↘' },
 ];
 
-/** Where each anchor places the timestamp box, as fractions of the photo. */
-const ANCHORS: Record<TimestampPosition, { x: number; y: number }> = {
-  'top-left': { x: 0.04, y: 0.06 },
-  'top-center': { x: 0.5, y: 0.06 },
-  'top-right': { x: 0.96, y: 0.06 },
-  'bottom-left': { x: 0.04, y: 0.94 },
-  'bottom-center': { x: 0.5, y: 0.94 },
-  'bottom-right': { x: 0.96, y: 0.94 },
-};
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), Math.max(min, max));
-}
-
-function centerCrop(photo: LoadedPhoto): CropRect {
-  const side = Math.max(MIN_SIDE_PX, Math.min(photo.width, photo.height));
-  return { x: Math.round((photo.width - side) / 2), y: Math.round((photo.height - side) / 2), side };
-}
+const MIN_SIDE_PX = 32;
 
 /** Nearest common aspect ratio label for display (e.g. 9:16, 16:9, 1:1). */
 function aspectLabel(width: number, height: number): string {
@@ -102,11 +86,6 @@ export function CropEditor({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [crop, setCrop] = useState<CropRect | null>(null);
   const [cropEnabled, setCropEnabled] = useState(template !== null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState(0);
-
-  const imgRef = useRef<HTMLImageElement | null>(null);
-  const dragRef = useRef<{ mode: 'move' | 'resize'; startX: number; startY: number; origin: CropRect } | null>(null);
 
   /** Falls back to the first photo when the saved name is stale (new folder). */
   const validName = photos.some((file) => file.name === selectedName)
@@ -154,63 +133,6 @@ export function CropEditor({
     };
   }, [selectedPhoto, template]);
 
-  // Track the space available for the preview so ANY aspect ratio (16:9,
-  // 9:16, 1:1, 4:3, …) is shown fully and the crop rectangle always lines
-  // up with the displayed pixels — no letterboxing, no misalignment.
-  useEffect(() => {
-    const element = containerRef.current;
-    if (!element) return;
-    const update = () => setContainerWidth(element.clientWidth);
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [photo]);
-
-  const fitted = useMemo(() => {
-    if (!photo || containerWidth <= 0) return null;
-    const ratio = Math.min(containerWidth / photo.width, MAX_PREVIEW_SIDE / photo.height, 1);
-    return {
-      width: Math.max(1, Math.floor(photo.width * ratio)),
-      height: Math.max(1, Math.floor(photo.height * ratio)),
-      scale: ratio,
-    };
-  }, [photo, containerWidth]);
-
-  const scale = fitted ? fitted.scale : 0;
-
-  const beginDrag = (event: ReactPointerEvent, mode: 'move' | 'resize') => {
-    if (!crop || disabled) return;
-    event.preventDefault();
-    (event.target as HTMLElement).setPointerCapture(event.pointerId);
-    dragRef.current = { mode, startX: event.clientX, startY: event.clientY, origin: crop };
-  };
-
-  const onDragMove = (event: ReactPointerEvent) => {
-    const drag = dragRef.current;
-    if (!drag || !photo || scale <= 0) return;
-    const dx = (event.clientX - drag.startX) / scale;
-    const dy = (event.clientY - drag.startY) / scale;
-    const maxSide = Math.max(MIN_SIDE_PX, Math.min(photo.width, photo.height));
-
-    if (drag.mode === 'move') {
-      setCrop({
-        ...drag.origin,
-        x: Math.round(clamp(drag.origin.x + dx, 0, photo.width - drag.origin.side)),
-        y: Math.round(clamp(drag.origin.y + dy, 0, photo.height - drag.origin.side)),
-      });
-    } else {
-      const side = Math.round(
-        clamp(drag.origin.side + Math.max(dx, dy), MIN_SIDE_PX, Math.min(maxSide, photo.width - drag.origin.x, photo.height - drag.origin.y)),
-      );
-      setCrop({ ...drag.origin, side });
-    }
-  };
-
-  const endDrag = () => {
-    dragRef.current = null;
-  };
-
   const confirmCrop = () => {
     if (!photo || !crop) return;
     onConfirm({
@@ -229,20 +151,9 @@ export function CropEditor({
     if (!next) onConfirm(null); // turning crop off clears the saved template
   };
 
-  // Marker anchor: relative to the crop square when crop is on, otherwise
-  // relative to the whole photo — matching what the batch will produce.
-  const anchorBox = cropEnabled && crop
-    ? { left: crop.x, top: crop.y, side: crop.side }
-    : photo
-      ? { left: 0, top: 0, side: Math.min(photo.width, photo.height) }
-      : null;
-  const marker = anchorBox
-    ? {
-        left: (anchorBox.left + ANCHORS[position].x * anchorBox.side) * scale,
-        top: (anchorBox.top + ANCHORS[position].y * anchorBox.side) * scale,
-        transform: `translate(${-ANCHORS[position].x * 100}%, ${-ANCHORS[position].y * 100}%)`,
-      }
-    : null;
+  const handleCropChange = (newCrop: CropRect | null) => {
+    setCrop(newCrop);
+  };
 
   return (
     <Card
@@ -296,63 +207,16 @@ export function CropEditor({
 
       {photo && crop && (
         <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1fr)_240px]">
-          <div ref={containerRef} className="min-w-0">
-            {fitted ? (
-              <div
-                className="relative select-none overflow-hidden rounded-lg bg-slate-900"
-                style={{ width: fitted.width, height: fitted.height }}
-              >
-                <img
-                  ref={imgRef}
-                  src={photo.url}
-                  alt={`Preview of ${validName}`}
-                  draggable={false}
-                  className="block"
-                  style={{ width: fitted.width, height: fitted.height }}
-                />
-                {cropEnabled && (
-                  <div
-                    role="button"
-                    aria-label="Crop area — drag to move"
-                    onPointerDown={(event) => beginDrag(event, 'move')}
-                    onPointerMove={onDragMove}
-                    onPointerUp={endDrag}
-                    className="absolute cursor-move touch-none border-2 border-white/90"
-                    style={{
-                      left: crop.x * scale,
-                      top: crop.y * scale,
-                      width: crop.side * scale,
-                      height: crop.side * scale,
-                      boxShadow: '0 0 0 9999px rgba(15, 23, 42, 0.55)',
-                    }}
-                  >
-                    <div
-                      aria-label="Resize handle"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        beginDrag(event, 'resize');
-                      }}
-                      onPointerMove={onDragMove}
-                      onPointerUp={endDrag}
-                      className="absolute -bottom-2 -right-2 h-5 w-5 cursor-nwse-resize touch-none rounded-sm border-2 border-white bg-indigo-600"
-                    />
-                  </div>
-                )}
-                {marker && (
-                  <div
-                    aria-label="Timestamp position"
-                    className="pointer-events-none absolute whitespace-nowrap rounded bg-slate-900/80 px-1.5 py-0.5 text-[10px] font-semibold text-white ring-1 ring-white/40"
-                    style={marker}
-                  >
-                    timestamp
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="flex h-48 items-center justify-center rounded-lg border border-dashed border-slate-300 text-xs text-slate-400">
-                Memuat preview…
-              </div>
-            )}
+          <div className="min-w-0">
+            <CropBox
+              url={photo.url}
+              width={photo.width}
+              height={photo.height}
+              crop={crop}
+              position={position}
+              onCropChange={handleCropChange}
+              disabled={disabled}
+            />
           </div>
 
           <div className="space-y-4">

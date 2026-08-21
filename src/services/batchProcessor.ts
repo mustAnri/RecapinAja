@@ -188,117 +188,11 @@ export async function processBatch(
     mapping,
     options.concurrency ?? DEFAULT_CONCURRENCY,
       async (entry, index): Promise<BatchResult> => {
-
-      if (cancelled || (options.isCancelled?.() ?? false)) {
-        cancelled = true;
-        return {
-          filename: entry.file.name,
-          status: 'failed',
-          error: 'Cancelled before this photo was processed.',
-        };
-      }
-
-      // A row with invalid/missing data fails with a clear error (§32);
-      // the photo is never stamped with a fabricated timestamp.
-      if (entry.row.error) {
-        return {
-          filename: entry.file.name,
-          status: 'failed',
-          error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.error}.`,
-        };
-      }
-      if (entry.row.dateError) {
-        return {
-          filename: entry.file.name,
-          status: 'failed',
-          error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.dateError}.`,
-        };
-      }
-
-      const timestamp = formatTimestamp(entry.row.date, entry.row.time, options.formatId);
-
-      // The location overlay (when enabled) aligns with the original mapping
-      // index, not completion order.
-      const location = options.locationEnabled ? selectedLocations[index] : undefined;
-      const timestampPosition = options.position ?? 'bottom-right';
-      // An explicitly chosen location corner wins; otherwise fall back to the
-      // diagonal-opposite corner so the two overlays never collide.
-      const autoLocationPosition: TimestampPosition =
-        timestampPosition === 'top-left'
-          ? 'bottom-right'
-          : timestampPosition === 'top-right'
-            ? 'bottom-left'
-            : timestampPosition === 'bottom-left'
-              ? 'top-right'
-              : timestampPosition === 'bottom-right'
-                ? 'top-left'
-                : 'top-left';
-      const locationPosition = options.locationPosition ?? autoLocationPosition;
-      // When both overlays share one corner they are merged into a single
-      // stacked block (timestamp on top, address lines below) — never overlap.
-      const sameCorner = location !== undefined && locationPosition === timestampPosition;
-
-      try {
-        const photo = await processPhoto(entry.file, {
-          timestamp,
-          crop: options.crop,
-          position: options.position,
-          maxOutputSize: MAX_OUTPUT_SIDE_PX,
-          skipTimestamp: sameCorner,
+        return processSingleEntry(entry, {
+          ...options,
+          location: selectedLocations[index],
         });
-
-        let outputBlob = photo.blob;
-        if (location) {
-          const imgBitmap = await createImageBitmap(outputBlob);
-          try {
-            const canvas = document.createElement('canvas');
-            canvas.width = imgBitmap.width;
-            canvas.height = imgBitmap.height;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) {
-              throw new ImageProcessingError('Canvas 2D context is unavailable.');
-            }
-            ctx.drawImage(imgBitmap, 0, 0);
-
-            const overlayOptions = {
-              fontSizeRatio: 0.035,
-              minFontSize: 16,
-              textColor: '#ffffff',
-              backgroundColor: 'rgba(0, 0, 0, 0.7)',
-              paddingRatio: 0.4,
-            };
-
-            if (sameCorner) {
-              // One stacked block: timestamp line first, then address lines.
-              const lines = [timestamp, ...prepareAddressLines(location.address, 4)];
-              renderLinesOverlay(ctx, lines, timestampPosition, overlayOptions);
-            } else {
-              renderLocationOverlay(ctx, location, locationPosition, overlayOptions);
-            }
-
-            const encoded = await new Promise<Blob | null>((resolve) => {
-              canvas.toBlob(resolve, photo.mimeType, photo.mimeType === 'image/jpeg' ? 0.92 : undefined);
-            });
-            if (!encoded) {
-              throw new ImageProcessingError('Image encoding failed.');
-            }
-            outputBlob = encoded;
-          } finally {
-            imgBitmap.close();
-          }
-        }
-        
-        const outputFilename = buildOutputFilename(entry.file.name);
-        await options.outputFolder.write(outputFilename, outputBlob);
-        return { filename: entry.file.name, outputFilename, status: 'success' };
-      } catch (error) {
-        return {
-          filename: entry.file.name,
-          status: 'failed',
-          error: error instanceof Error ? error.message : 'Unable to process image.',
-        };
-      }
-    },
+      },
     (_index, result) => report(result),
   );
 
@@ -363,4 +257,127 @@ export async function processBatch(
   };
 
   return { results, summary, outputFolderName: options.outputFolder.name };
+}
+
+/**
+ * Process a single photo entry with the given options.
+ * Used by both processBatch and the ReviewStation.
+ */
+export async function processSingleEntry(
+  entry: SequentialMappingEntry,
+  options: Omit<BatchOptions, 'extraPhotos' | 'concurrency' | 'onProgress' | 'isCancelled' | 'extrasFolderName'> & {
+    location?: Location;
+  },
+): Promise<BatchResult> {
+  const {
+    crop,
+    formatId,
+    position,
+    outputFolder,
+    location,
+    locationPosition,
+    locationEnabled,
+    ...rest
+  } = options;
+
+  // A row with invalid/missing data fails with a clear error (§32);
+  // the photo is never stamped with a fabricated timestamp.
+  if (entry.row.error) {
+    return {
+      filename: entry.file.name,
+      status: 'failed',
+      error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.error}.`,
+    };
+  }
+  if (entry.row.dateError) {
+    return {
+      filename: entry.file.name,
+      status: 'failed',
+      error: `Baris ${entry.row.sheetRowNumber}: ${entry.row.dateError}.`,
+    };
+  }
+
+  const timestamp = formatTimestamp(entry.row.date, entry.row.time, formatId);
+
+  // The location overlay (when enabled) aligns with the original mapping
+  // index, not completion order.
+  const timestampPosition = position ?? 'bottom-right';
+  // An explicitly chosen location corner wins; otherwise fall back to the
+  // diagonal-opposite corner so the two overlays never collide.
+  const autoLocationPosition: TimestampPosition =
+    timestampPosition === 'top-left'
+      ? 'bottom-right'
+      : timestampPosition === 'top-right'
+        ? 'bottom-left'
+        : timestampPosition === 'bottom-left'
+          ? 'top-right'
+          : timestampPosition === 'bottom-right'
+            ? 'top-left'
+            : 'top-left';
+  const effectiveLocationPosition = locationPosition ?? autoLocationPosition;
+  // When both overlays share one corner they are merged into a single
+  // stacked block (timestamp on top, address lines below) — never overlap.
+  const sameCorner = location !== undefined && effectiveLocationPosition === timestampPosition;
+
+  try {
+    const photo = await processPhoto(entry.file, {
+      timestamp,
+      crop,
+      position: timestampPosition,
+      maxOutputSize: MAX_OUTPUT_SIDE_PX,
+      skipTimestamp: sameCorner,
+      ...rest,
+    });
+
+    let outputBlob = photo.blob;
+    if (location && locationEnabled) {
+      const imgBitmap = await createImageBitmap(outputBlob);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = imgBitmap.width;
+        canvas.height = imgBitmap.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          throw new ImageProcessingError('Canvas 2D context is unavailable.');
+        }
+        ctx.drawImage(imgBitmap, 0, 0);
+
+        const overlayOptions = {
+          fontSizeRatio: 0.035,
+          minFontSize: 16,
+          textColor: '#ffffff',
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          paddingRatio: 0.4,
+        };
+
+        if (sameCorner) {
+          // One stacked block: timestamp line first, then address lines.
+          const lines = [timestamp, ...prepareAddressLines(location.address, 4)];
+          renderLinesOverlay(ctx, lines, timestampPosition, overlayOptions);
+        } else {
+          renderLocationOverlay(ctx, location, effectiveLocationPosition, overlayOptions);
+        }
+
+        const encoded = await new Promise<Blob | null>((resolve) => {
+          canvas.toBlob(resolve, photo.mimeType, photo.mimeType === 'image/jpeg' ? 0.92 : undefined);
+        });
+        if (!encoded) {
+          throw new ImageProcessingError('Image encoding failed.');
+        }
+        outputBlob = encoded;
+      } finally {
+        imgBitmap.close();
+      }
+    }
+
+    const outputFilename = buildOutputFilename(entry.file.name);
+    await outputFolder.write(outputFilename, outputBlob);
+    return { filename: entry.file.name, outputFilename, status: 'success' };
+  } catch (error) {
+    return {
+      filename: entry.file.name,
+      status: 'failed',
+      error: error instanceof Error ? error.message : 'Unable to process image.',
+    };
+  }
 }
