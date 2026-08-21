@@ -128,7 +128,11 @@ describe('pipeline end-to-end — Google Forms export', () => {
 
     expect(output.summary).toEqual({ total: 3, successful: 3, failed: 0, copied: 0 });
     expect(written.map((w) => w.filename)).toEqual(photos.map((p) => buildOutputFilename(p.name)));
-    expect(harness.timestamps).toEqual(['08/08/2026 14:00', '08/08/2026 11:00', '10/08/2026 21:30']);
+    expect(harness.timestamps).toEqual([
+      '08 Agustus 2026 14:00',
+      '08 Agustus 2026 11:00',
+      '10 Agustus 2026 21:30',
+    ]);
   });
 
   it('produces no output when the Timestamp column is forced as the date source', async () => {

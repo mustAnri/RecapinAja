@@ -43,6 +43,9 @@ export interface ProcessingSettings {
 /** `copied` = extra photo saved as-is (no matching time row). */
 export type ProcessingStatus = 'success' | 'failed' | 'copied';
 
+/** Review status for labeling-tool style workflow */
+export type ReviewStatus = 'pending' | 'approved' | 'skipped' | 'unsure' | 'failed';
+
 /** Outcome for one photo in the batch (§33). */
 export interface BatchResult {
   filename: string;
@@ -64,6 +67,10 @@ export interface BatchSummary {
   failed: number;
   /** Extra photos copied as-is because they had no time row. */
   copied: number;
+  /** Photos skipped during review */
+  skipped?: number;
+  /** Photos marked as unsure during review */
+  unsure?: number;
 }
 
 export interface BatchOutput {
